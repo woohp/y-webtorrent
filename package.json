@@ -1,0 +1,26 @@
+{
+  "name": "y-webtorrent",
+  "version": "0.1.0",
+  "description": "Yjs provider using WebTorrent tracker signaling and WebRTC data channels",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "scripts": {
+    "dev": "vite examples/browser-smoke --host 0.0.0.0",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "lib0": "^0.2.114",
+    "simple-peer": "^9.11.1",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.27"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5",
+    "vite-plugin-node-polyfills": "^0.28.0"
+  }
+}
