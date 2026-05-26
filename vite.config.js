@@ -1,18 +1,18 @@
-import { defineConfig } from 'vite'
-import { nodePolyfills } from 'vite-plugin-node-polyfills'
+import { defineConfig } from "vite";
+import { nodePolyfills } from "vite-plugin-node-polyfills";
 
 export default defineConfig({
   define: {
-    global: 'globalThis'
+    global: "globalThis",
   },
   plugins: [
     nodePolyfills({
       globals: {
         Buffer: true,
         global: true,
-        process: true
+        process: true,
       },
-      protocolImports: true
-    })
-  ]
-})
+      protocolImports: true,
+    }),
+  ],
+});

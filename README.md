@@ -3,13 +3,13 @@
 Yjs provider that uses WebTorrent-compatible WebSocket trackers for peer discovery/signaling, then syncs over WebRTC data channels.
 
 ```js
-import * as Y from 'yjs'
-import { WebtorrentProvider } from 'y-webtorrent'
+import * as Y from "yjs";
+import { WebtorrentProvider } from "y-webtorrent";
 
-const doc = new Y.Doc()
-const provider = new WebtorrentProvider('room-name', doc, {
-  trackers: ['wss://tracker.openwebtorrent.com']
-})
+const doc = new Y.Doc();
+const provider = new WebtorrentProvider("room-name", doc, {
+  trackers: ["wss://tracker.openwebtorrent.com"],
+});
 ```
 
 Trackers only exchange WebRTC offers/answers. Yjs document updates are sent peer-to-peer over WebRTC and are not stored by the tracker.

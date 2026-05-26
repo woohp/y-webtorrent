@@ -14,7 +14,11 @@ Browser-oriented Yjs provider that uses WebTorrent-compatible WebSocket trackers
 
 ## Validation
 
-- Syntax/checks:
+- Formatting/linting:
+  - `npm run format`
+  - `npm run lint`
+  - `npm run check`
+- Syntax/checks when useful:
   - `node --check src/y-webtorrent.js`
   - `node --check src/tracker.js`
   - `node --check src/crypto.js`
