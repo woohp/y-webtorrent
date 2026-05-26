@@ -81,12 +81,12 @@ export class WebtorrentProvider extends Observable<string> {
   readonly debug: boolean;
   readonly awareness: Awareness;
   readonly ready: Promise<void>;
-  shouldConnect = true;
-  synced = false;
+  shouldConnect: boolean = true;
+  synced: boolean = false;
   infoHash: string | null = null;
   trackerConnections: TrackerConnection[] = [];
-  peers = new Map<PeerId, WebrtcPeer>();
-  pendingOffers = new Map<OfferId, PendingOffer>();
+  peers: Map<PeerId, WebrtcPeer> = new Map();
+  pendingOffers: Map<OfferId, PendingOffer> = new Map();
   private readonly _ownsAwareness: boolean;
   private readonly _docUpdateHandler: DocUpdateHandler;
   private readonly _awarenessUpdateHandler: AwarenessUpdateHandler;
@@ -235,7 +235,7 @@ export class WebtorrentProvider extends Observable<string> {
       onMessage: (peer, data) => readMessage(this, peer, data),
       onClose: (peer) => this.removePeer(peer),
       onError: (_peer, error) => this.emit("peer-error", [error]),
-      onDebug: (event) => this.emitDebug({ type: String(event.type), ...event }),
+      onDebug: (event) => this.emitDebug({ type: String(event["type"]), ...event }),
     });
     this.emitDebug({
       type: "peer-created",
@@ -320,7 +320,7 @@ export class WebtorrentProvider extends Observable<string> {
     this.emit("synced", [false]);
   }
 
-  destroy(): void {
+  override destroy(): void {
     this.disconnect();
     this.doc.off("update", this._docUpdateHandler);
     this.awareness.off("update", this._awarenessUpdateHandler);
