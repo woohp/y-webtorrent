@@ -22,9 +22,19 @@ Trackers only exchange WebRTC offers/answers. Yjs document updates are sent peer
 - `maxConns`: maximum WebRTC peers, default `20`.
 - `numwant`: offers to create per tracker announce, default `3`.
 - `offerTimeout`: max milliseconds to wait for local WebRTC offers before announcing, default `5000`.
-- `peerOpts`: extra options passed to `simple-peer`.
+- `rtcConfig`: optional `RTCPeerConnection` configuration.
+- `channelName`: WebRTC data channel name, default `y-webtorrent`.
 - `debug`: emit verbose `debug` events, default `false`.
 - `WebSocket`: injectable WebSocket constructor, mostly for tests/non-browser runtimes.
+
+## Build
+
+```sh
+npm run build
+npm run check
+```
+
+The package is authored in TypeScript and built with TypeScript native preview/`tsgo` to `dist/`, including `.d.ts` declarations.
 
 ## Browser smoke test
 
@@ -36,10 +46,10 @@ npm run dev
 
 Open the printed localhost URL in two tabs, click Connect in both, then type in the shared textarea. Use `?room=some-room&trackers=wss://tracker.webtorrent.dev` to override defaults.
 
-If using Vite in your own app, `simple-peer` needs Node compatibility shims for packages like `readable-stream`; see `vite.config.js` in this repo.
+The provider uses browser-native `RTCPeerConnection`/`RTCDataChannel`; no Node WebRTC shim is bundled.
 
 ## Notes
 
 This package is browser-oriented. Node support requires supplying compatible WebSocket/WebRTC implementations through options.
 
-Initial connections may take a few seconds because the provider currently uses non-trickle ICE (`simple-peer` with `trickle: false`) so tracker messages contain complete offers/answers.
+Initial connections may take a few seconds because the provider currently uses non-trickle ICE so tracker messages contain complete offers/answers.

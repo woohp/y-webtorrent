@@ -1,18 +1,11 @@
 import { defineConfig } from "vite";
-import { nodePolyfills } from "vite-plugin-node-polyfills";
 
 export default defineConfig({
-  define: {
-    global: "globalThis",
+  build: {
+    outDir: "examples/browser-smoke/dist",
+    target: "esnext",
   },
-  plugins: [
-    nodePolyfills({
-      globals: {
-        Buffer: true,
-        global: true,
-        process: true,
-      },
-      protocolImports: true,
-    }),
-  ],
+  esbuild: {
+    target: "esnext",
+  },
 });

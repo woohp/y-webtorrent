@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import { WebtorrentProvider } from "../../index.js";
+import { WebtorrentProvider } from "../../src/index.ts";
 
 const roomInput = document.querySelector("#room");
 const trackersInput = document.querySelector("#trackers");
