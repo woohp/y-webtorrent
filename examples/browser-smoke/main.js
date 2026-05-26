@@ -18,84 +18,84 @@ let applyingRemote = false;
 const logs = [];
 
 const log = (...args) => {
-  logs.unshift(`[${new Date().toLocaleTimeString()}] ${args.map(format).join(" ")}`);
-  logs.splice(80);
-  renderStatus();
+    logs.unshift(`[${new Date().toLocaleTimeString()}] ${args.map(format).join(" ")}`);
+    logs.splice(80);
+    renderStatus();
 };
 
 const format = (value) => {
-  if (typeof value === "string") return value;
-  if (value instanceof Error) return value.stack || value.message;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+    if (typeof value === "string") return value;
+    if (value instanceof Error) return value.stack || value.message;
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return String(value);
+    }
 };
 
 const renderStatus = () => {
-  statusEl.textContent = [
-    `room: ${roomInput.value}`,
-    `trackers: ${trackersInput.value}`,
-    `connected: ${provider ? provider.peers.size : 0}`,
-    `peer id: ${provider ? JSON.stringify(provider.peerId) : "-"}`,
-    "",
-    ...logs,
-  ].join("\n");
+    statusEl.textContent = [
+        `room: ${roomInput.value}`,
+        `trackers: ${trackersInput.value}`,
+        `connected: ${provider ? provider.peers.size : 0}`,
+        `peer id: ${provider ? JSON.stringify(provider.peerId) : "-"}`,
+        "",
+        ...logs,
+    ].join("\n");
 };
 
 const connect = () => {
-  disconnect();
+    disconnect();
 
-  doc = new Y.Doc();
-  ytext = doc.getText("text");
-  provider = new WebtorrentProvider(roomInput.value, doc, {
-    trackers: trackersInput.value
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
-    debug: true,
-  });
+    doc = new Y.Doc();
+    ytext = doc.getText("text");
+    provider = new WebtorrentProvider(roomInput.value, doc, {
+        trackers: trackersInput.value
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
+        debug: true,
+    });
 
-  provider.on("status", (event) => log("tracker status", event));
-  provider.on("peers", (peers) => log("peers", peers));
-  provider.on("synced", (synced) => log("synced", synced));
-  provider.on("connection-error", (event) => log("connection-error", event));
-  provider.on("peer-error", (event) => log("peer-error", event));
-  provider.on("debug", (event) => log("debug", event));
+    provider.on("status", (event) => log("tracker status", event));
+    provider.on("peers", (peers) => log("peers", peers));
+    provider.on("synced", (synced) => log("synced", synced));
+    provider.on("connection-error", (event) => log("connection-error", event));
+    provider.on("peer-error", (event) => log("peer-error", event));
+    provider.on("debug", (event) => log("debug", event));
 
-  ytext.observe(() => {
-    applyingRemote = true;
-    textArea.value = ytext.toString();
-    applyingRemote = false;
-  });
+    ytext.observe(() => {
+        applyingRemote = true;
+        textArea.value = ytext.toString();
+        applyingRemote = false;
+    });
 
-  textArea.disabled = false;
-  connectButton.disabled = true;
-  disconnectButton.disabled = false;
-  log("connecting");
-  provider.ready.then(() => log("provider ready"));
-  renderStatus();
+    textArea.disabled = false;
+    connectButton.disabled = true;
+    disconnectButton.disabled = false;
+    log("connecting");
+    provider.ready.then(() => log("provider ready"));
+    renderStatus();
 };
 
 const disconnect = () => {
-  if (provider) provider.destroy();
-  if (doc) doc.destroy();
-  provider = null;
-  doc = null;
-  ytext = null;
-  textArea.disabled = true;
-  connectButton.disabled = false;
-  disconnectButton.disabled = true;
-  renderStatus();
+    if (provider) provider.destroy();
+    if (doc) doc.destroy();
+    provider = null;
+    doc = null;
+    ytext = null;
+    textArea.disabled = true;
+    connectButton.disabled = false;
+    disconnectButton.disabled = true;
+    renderStatus();
 };
 
 textArea.addEventListener("input", () => {
-  if (!ytext || applyingRemote) return;
-  doc.transact(() => {
-    ytext.delete(0, ytext.length);
-    ytext.insert(0, textArea.value);
-  });
+    if (!ytext || applyingRemote) return;
+    doc.transact(() => {
+        ytext.delete(0, ytext.length);
+        ytext.insert(0, textArea.value);
+    });
 });
 
 connectButton.addEventListener("click", connect);

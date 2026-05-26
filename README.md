@@ -8,7 +8,7 @@ import { WebtorrentProvider } from "y-webtorrent";
 
 const doc = new Y.Doc();
 const provider = new WebtorrentProvider("room-name", doc, {
-  trackers: ["wss://tracker.openwebtorrent.com"],
+    trackers: ["wss://tracker.openwebtorrent.com"],
 });
 ```
 
