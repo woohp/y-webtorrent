@@ -19,6 +19,7 @@
     },
     "scripts": {
         "build": "tsgo -p tsconfig.json",
+        "prepare": "npm run build",
         "dev": "vite examples/browser-smoke --host 0.0.0.0",
         "format": "oxfmt --write .",
         "lint": "oxlint .",
