@@ -14,6 +14,20 @@ const provider = new WebtorrentProvider("room-name", doc, {
 
 Trackers only exchange WebRTC offers/answers. Yjs document updates are sent peer-to-peer over WebRTC and are not stored by the tracker.
 
+## Directed messages
+
+Applications can send transient binary data to one connected peer without adding it to the shared Yjs document:
+
+```js
+const delivered = provider.sendToPeer(peerId, new TextEncoder().encode("hello"));
+
+provider.on("direct-message", (peerId, data) => {
+    console.log(peerId, new TextDecoder().decode(data));
+});
+```
+
+`sendToPeer` returns `false` when the peer is missing or its data channel is not open. Directed messages are not persisted, retried, or forwarded to other peers.
+
 ## Options
 
 - `trackers`: WebSocket tracker URLs.

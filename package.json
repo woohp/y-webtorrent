@@ -25,7 +25,7 @@
         "lint": "oxlint .",
         "typecheck": "tsgo -p tsconfig.json --noEmit",
         "check": "npm run lint && npm run typecheck && npm test",
-        "test": "node --test"
+        "test": "npm run build && node --test"
     },
     "dependencies": {
         "lib0": "^0.2.114",

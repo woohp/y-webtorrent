@@ -21,6 +21,7 @@ export { defaultTrackerUrls };
 const messageSync = 0;
 const messageAwareness = 1;
 const messageQueryAwareness = 3;
+const messageDirect = 4;
 
 type PendingOffer = { peer: WebrtcPeer; tracker: TrackerConnection };
 type OfferRecord = PendingOffer & { offerId: OfferId; offered: boolean };
@@ -64,6 +65,8 @@ const readMessage = (provider: WebtorrentProvider, peer: WebrtcPeer, data: Array
         );
     } else if (messageType === messageQueryAwareness) {
         provider.sendAwareness(peer);
+    } else if (messageType === messageDirect && peer.remotePeerId) {
+        provider.emit("direct-message", [peer.remotePeerId, decoding.readVarUint8Array(decoder)]);
     }
 };
 
@@ -296,6 +299,17 @@ export class WebtorrentProvider extends Observable<string> {
         encoding.writeVarUint(encoder, messageAwareness);
         encoding.writeVarUint8Array(encoder, update);
         this.broadcast(encoding.toUint8Array(encoder));
+    }
+
+    sendToPeer(peerId: PeerId, message: Uint8Array<ArrayBuffer>): boolean {
+        const peer = this.peers.get(peerId);
+        if (!peer?.connected) return false;
+
+        const encoder = encoding.createEncoder();
+        encoding.writeVarUint(encoder, messageDirect);
+        encoding.writeVarUint8Array(encoder, message);
+        peer.send(encoding.toUint8Array(encoder));
+        return true;
     }
 
     broadcast(message: Uint8Array<ArrayBuffer>): void {
