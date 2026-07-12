@@ -62,7 +62,11 @@ const readMessage = (provider: WebtorrentProvider, peer: WebrtcPeer, data: Array
 
     if (messageType === messageSync) {
         encoding.writeVarUint(encoder, messageSync);
-        syncProtocol.readSyncMessage(decoder, encoder, provider.doc, peer);
+        const syncMessageType = syncProtocol.readSyncMessage(decoder, encoder, provider.doc, peer);
+        if (syncMessageType === syncProtocol.messageYjsSyncStep2 && !peer.synced) {
+            peer.synced = true;
+            provider.checkIsSynced();
+        }
         if (encoding.length(encoder) > 1) peer.send(encoding.toUint8Array(encoder));
     } else if (messageType === messageAwareness) {
         awarenessProtocol.applyAwarenessUpdate(
@@ -225,7 +229,7 @@ export class WebtorrentProvider extends Observable<string> {
 
         this.pendingOffers.delete(offerId);
         pending.peer.remotePeerId = peerId;
-        this.peers.set(peerId, pending.peer);
+        this.addPeer(peerId, pending.peer);
         try {
             await pending.peer.acceptAnswer(answer);
         } catch (error) {
@@ -258,21 +262,48 @@ export class WebtorrentProvider extends Observable<string> {
 
     onPeerOpen(peer: WebrtcPeer, initiator: boolean): void {
         this.emitDebug({ type: "peer-connect", peerId: peer.remotePeerId, initiator });
-        if (peer.remotePeerId) this.peers.set(peer.remotePeerId, peer);
+        if (peer.remotePeerId) this.addPeer(peer.remotePeerId, peer);
         this.sendSyncStep1(peer);
         this.sendAwareness(peer);
-        this.synced = true;
-        this.emit("synced", [true]);
-        this.emit("peers", [Array.from(this.peers.keys())]);
+        this.checkIsSynced();
+    }
+
+    addPeer(peerId: PeerId, peer: WebrtcPeer): void {
+        if (this.peers.get(peerId) === peer) return;
+        this.peers.set(peerId, peer);
+        this.emitPeerChange([peerId], []);
     }
 
     removePeer(peer: WebrtcPeer): void {
-        let changed = false;
-        if (peer.remotePeerId && this.peers.delete(peer.remotePeerId)) changed = true;
+        let removed: PeerId[] = [];
+        if (peer.remotePeerId && this.peers.get(peer.remotePeerId) === peer) {
+            this.peers.delete(peer.remotePeerId);
+            removed = [peer.remotePeerId];
+        }
         for (const [offerId, pending] of this.pendingOffers) {
             if (pending.peer === peer) this.pendingOffers.delete(offerId);
         }
-        if (changed) this.emit("peers", [Array.from(this.peers.keys())]);
+        if (removed.length > 0) this.emitPeerChange([], removed);
+        this.checkIsSynced();
+    }
+
+    checkIsSynced(): void {
+        const connectedPeers = Array.from(this.peers.values()).filter((peer) => peer.connected);
+        const synced = this.shouldConnect && connectedPeers.every((peer) => peer.synced);
+        if (synced !== this.synced) {
+            this.synced = synced;
+            this.emit("synced", [{ synced }]);
+        }
+    }
+
+    emitPeerChange(added: PeerId[], removed: PeerId[]): void {
+        this.emit("peers", [
+            {
+                added,
+                removed,
+                webrtcPeers: Array.from(this.peers.keys()),
+            },
+        ]);
     }
 
     sendSyncStep1(peer: WebrtcPeer): void {
@@ -338,7 +369,7 @@ export class WebtorrentProvider extends Observable<string> {
         this.peers.clear();
         this.pendingOffers.clear();
         this.synced = false;
-        this.emit("synced", [false]);
+        this.emit("synced", [{ synced: false }]);
     }
 
     override destroy(): void {

@@ -26,6 +26,7 @@ export class WebrtcPeer {
     remotePeerId: PeerId | null;
     channel: RTCDataChannel | null = null;
     closed = false;
+    synced = false;
 
     constructor(opts: WebrtcPeerOptions) {
         this.initiator = opts.initiator;
