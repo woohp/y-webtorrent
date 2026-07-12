@@ -38,11 +38,31 @@ class FakePeerConnection {
 
 globalThis.RTCPeerConnection = FakePeerConnection;
 
-const { WebtorrentProvider } = await import("../dist/index.js");
+const { WebtorrentProvider, defaultRtcConfig } = await import("../dist/index.js");
 
 function createProvider(peerId) {
     return new WebtorrentProvider("test-room", new Y.Doc(), { peerId, trackers: [] });
 }
+
+test("uses public STUN servers by default and allows rtcConfig overrides", () => {
+    const provider = createProvider("default-rtc");
+    assert.equal(provider.rtcConfig, defaultRtcConfig);
+    assert.deepEqual(provider.rtcConfig.iceServers, [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun.cloudflare.com:3478" },
+    ]);
+
+    const rtcConfig = { iceServers: [] };
+    const overridden = new WebtorrentProvider("test-room", new Y.Doc(), {
+        peerId: "overridden-rtc",
+        trackers: [],
+        rtcConfig,
+    });
+    assert.equal(overridden.rtcConfig, rtcConfig);
+
+    provider.destroy();
+    overridden.destroy();
+});
 
 test("sendToPeer sends a directed binary message to only the selected peer", async () => {
     const sender = createProvider("sender");

@@ -18,6 +18,13 @@ import { WebrtcPeer } from "./webrtc-peer.js";
 
 export { defaultTrackerUrls };
 
+export const defaultRtcConfig: RTCConfiguration = {
+    iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun.cloudflare.com:3478" },
+    ],
+};
+
 const messageSync = 0;
 const messageAwareness = 1;
 const messageQueryAwareness = 3;
@@ -78,7 +85,7 @@ export class WebtorrentProvider extends Observable<string> {
     readonly maxConns: number;
     readonly numwant: number;
     readonly offerTimeout: number;
-    readonly rtcConfig: RTCConfiguration | undefined;
+    readonly rtcConfig: RTCConfiguration;
     readonly channelName: string;
     readonly peerId: PeerId;
     readonly debug: boolean;
@@ -103,7 +110,7 @@ export class WebtorrentProvider extends Observable<string> {
         this.maxConns = opts.maxConns ?? 20;
         this.numwant = opts.numwant ?? Math.min(3, Math.max(1, this.maxConns));
         this.offerTimeout = opts.offerTimeout ?? 5000;
-        this.rtcConfig = opts.rtcConfig;
+        this.rtcConfig = opts.rtcConfig ?? defaultRtcConfig;
         this.channelName = opts.channelName ?? "y-webtorrent";
         this.peerId = opts.peerId || createPeerId();
         this.debug = !!opts.debug;

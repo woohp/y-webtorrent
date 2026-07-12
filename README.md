@@ -36,7 +36,7 @@ provider.on("direct-message", (peerId, data) => {
 - `maxConns`: maximum WebRTC peers, default `20`.
 - `numwant`: offers to create per tracker announce, default `3`.
 - `offerTimeout`: max milliseconds to wait for local WebRTC offers before announcing, default `5000`.
-- `rtcConfig`: optional `RTCPeerConnection` configuration.
+- `rtcConfig`: optional `RTCPeerConnection` configuration. By default, connections use Google and Cloudflare public STUN servers for NAT traversal. Pass `{ iceServers: [] }` to disable them or provide your own STUN/TURN servers.
 - `channelName`: WebRTC data channel name, default `y-webtorrent`.
 - `debug`: emit verbose `debug` events, default `false`.
 - `WebSocket`: injectable WebSocket constructor, mostly for tests/non-browser runtimes.
