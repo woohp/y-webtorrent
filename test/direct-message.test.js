@@ -5,6 +5,7 @@ import * as Y from "yjs";
 class FakeDataChannel {
     binaryType = "blob";
     readyState = "open";
+    bufferedAmount = 0;
     listeners = new Map();
 
     addEventListener(event, listener) {
@@ -70,7 +71,10 @@ test("sendToPeer sends a directed binary message to only the selected peer", asy
     const sent = [];
     sender.peers.set("recipient", {
         connected: true,
-        send: (data) => sent.push(data),
+        send: (data) => {
+            sent.push(data);
+            return true;
+        },
         destroy: () => {},
     });
     sender.peers.set("other", {
@@ -85,6 +89,7 @@ test("sendToPeer sends a directed binary message to only the selected peer", asy
     const recipient = createProvider("recipient");
     await recipient.ready;
     const peer = recipient.createPeer("sender", true);
+    recipient.peers.set("sender", peer);
     const received = new Promise((resolve) => {
         recipient.on("direct-message", (peerId, payload) => resolve({ peerId, payload }));
     });

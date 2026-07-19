@@ -26,7 +26,7 @@ provider.on("direct-message", (peerId, data) => {
 });
 ```
 
-`sendToPeer` returns `false` when the peer is missing or its data channel is not open. Directed messages are not persisted, retried, or forwarded to other peers.
+`sendToPeer` returns `false` when the peer is missing or disconnected, the frame or buffering limit is exceeded, or the browser rejects the send. Transport failures are also reported through `peer-error`. Directed messages are not persisted, retried, or forwarded to other peers.
 
 ## Options
 
@@ -36,10 +36,15 @@ provider.on("direct-message", (peerId, data) => {
 - `maxConns`: maximum WebRTC peers, default `20`.
 - `numwant`: offers to create per tracker announce, default `3`.
 - `offerTimeout`: max milliseconds to wait for local WebRTC offers before announcing, default `5000`.
+- `signalTimeout`: max milliseconds for a signaled peer to open, default `15000`.
+- `trackerConnectTimeout`: max milliseconds for a tracker WebSocket to open, default `10000`.
+- `fallbackMaxMessageSize`: single-frame limit when SCTP does not report one, default `256` KiB.
+- `maxBufferedAmount`: data-channel buffering ceiling, default `4` MiB.
 - `rtcConfig`: optional `RTCPeerConnection` configuration. By default, connections use Google and Cloudflare public STUN servers for NAT traversal. Pass `{ iceServers: [] }` to disable them or provide your own STUN/TURN servers.
 - `channelName`: WebRTC data channel name, default `y-webtorrent`.
 - `debug`: emit verbose `debug` events, default `false`.
 - `WebSocket`: injectable WebSocket constructor, mostly for tests/non-browser runtimes.
+- `RTCPeerConnection`: injectable WebRTC constructor for tests/non-browser runtimes.
 
 ## Build
 
@@ -66,4 +71,6 @@ The provider uses browser-native `RTCPeerConnection`/`RTCDataChannel`; no Node W
 
 This package is browser-oriented. Node support requires supplying compatible WebSocket/WebRTC implementations through options.
 
-Initial connections may take a few seconds because the provider currently uses non-trickle ICE so tracker messages contain complete offers/answers.
+Initial connections may take a few seconds because the provider uses non-trickle ICE so tracker messages contain complete offers/answers. `provider.synced` becomes true only after Yjs Sync Step 2 completes with at least one currently connected peer.
+
+WebRTC messages use single data-channel frames. Fragmentation, large-document synchronization beyond the negotiated or fallback frame limit, sustained burst traffic, and outbound queueing are intentionally unsupported.

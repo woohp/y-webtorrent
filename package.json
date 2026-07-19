@@ -18,7 +18,7 @@
         }
     },
     "scripts": {
-        "build": "tsc -p tsconfig.json",
+        "build": "rm -rf dist && tsc -p tsconfig.json",
         "prepare": "npm run build",
         "dev": "vite examples/browser-smoke --host 0.0.0.0",
         "format": "oxfmt --write .",
@@ -29,6 +29,7 @@
     },
     "dependencies": {
         "lib0": "^0.2.117",
+        "webrtc-data-peer": "git+https://github.com/woohp/webrtc-data-peer.git#9dabb5b",
         "y-protocols": "^1.0.7",
         "yjs": "^13.6.31"
     },
