@@ -25,6 +25,12 @@ class FakePeerConnection {
     createDataChannel() {
         return this.channel;
     }
+    async createOffer() {
+        return { type: "offer", sdp: "partial-offer" };
+    }
+    async setLocalDescription(description) {
+        this.localDescription = { ...description, toJSON: () => ({ ...description }) };
+    }
     close() {}
 }
 
@@ -219,8 +225,8 @@ for (const order of ["lower-first", "higher-first"]) {
         const lowerTracker = createFakeTracker();
         const higherTracker = createFakeTracker();
         const [lowerOffers, higherOffers] = await Promise.all([
-            lower.createOffers(lowerTracker),
-            higher.createOffers(higherTracker),
+            lower.createOffers(),
+            higher.createOffers(),
         ]);
         const deliverLowerOffer = () =>
             higher.receiveOffer(
@@ -292,7 +298,7 @@ for (const [localId, remoteId, keepsOutbound] of [
         await provider.ready;
         installSignalingPeers(provider);
         const tracker = createFakeTracker();
-        const offers = await provider.createOffers(tracker);
+        const offers = await provider.createOffers();
         await provider.receiveAnswer(remoteId, offers[0].offer_id, {
             type: "answer",
             sdp: "answer-first",
@@ -326,7 +332,7 @@ test("lower peer replaces a pending inbound duplicate with its outbound peer", a
     );
     const inbound = lower.pendingPeerIds.get("b".repeat(20));
     assert.equal(inbound.initiator, false);
-    const offers = await lower.createOffers(tracker);
+    const offers = await lower.createOffers();
 
     await lower.receiveAnswer("b".repeat(20), offers[0].offer_id, { type: "answer", sdp: "local" });
 
@@ -341,7 +347,7 @@ test("canceled outbound peer cannot regain a timeout after acceptAnswer resolves
     await higher.ready;
     installSignalingPeers(higher);
     const tracker = createFakeTracker();
-    const offers = await higher.createOffers(tracker);
+    const offers = await higher.createOffers();
     const outbound = higher.pendingOffers.get(offers[0].offer_id).peer;
     let resolveAnswer;
     outbound.acceptAnswer = () => new Promise((resolve) => (resolveAnswer = resolve));
@@ -373,7 +379,7 @@ test("canceled unresolved offers cannot later be announced", async () => {
     let resolveOffer;
     installSignalingPeers(higher, () => new Promise((resolve) => (resolveOffer = resolve)));
     const tracker = createFakeTracker();
-    const creatingOffers = higher.createOffers(tracker);
+    const creatingOffers = higher.createOffers();
     await Promise.resolve();
 
     await higher.receiveOffer(
@@ -391,14 +397,48 @@ test("canceled unresolved offers cannot later be announced", async () => {
     higher.destroy();
 });
 
-test("glare cancellation removes only one of multiple tracker offers", async () => {
+test("unrelated outbound answers cannot exceed connected capacity", async () => {
+    const provider = createProvider("capacity-owner", { maxConns: 1, numwant: 1 });
+    await provider.ready;
+    installSignalingPeers(provider);
+    const offers = await provider.createOffers();
+    const outbound = provider.pendingOffers.get(offers[0].offer_id).peer;
+    const activePeer = { connected: true, initiator: false, send: () => true, destroy: () => {} };
+    provider.peerIds.set(activePeer, "already-connected");
+    provider.peers.set("already-connected", activePeer);
+
+    await provider.receiveAnswer("different-peer", offers[0].offer_id, {
+        type: "answer",
+        sdp: "different-peer",
+    });
+
+    assert.equal(outbound.destroyed, true);
+    assert.deepEqual(Array.from(provider.peers.keys()), ["already-connected"]);
+
+    const latePeer = {
+        connected: true,
+        initiator: false,
+        send: () => true,
+        destroyed: false,
+        destroy() {
+            this.destroyed = true;
+        },
+    };
+    provider.peerIds.set(latePeer, "late-unrelated");
+    provider.pendingPeers.add(latePeer);
+    provider.pendingPeerIds.set("late-unrelated", latePeer);
+    provider.onPeerOpen(latePeer, false);
+    assert.equal(latePeer.destroyed, true);
+    assert.equal(provider.peers.size, 1);
+    provider.destroy();
+});
+test("glare cancellation removes only one of multiple outstanding offers", async () => {
     const higher = createProvider("b".repeat(20), { maxConns: 2, numwant: 1 });
     await higher.ready;
     installSignalingPeers(higher);
     const firstTracker = createFakeTracker();
-    const secondTracker = createFakeTracker();
-    await higher.createOffers(firstTracker);
-    await higher.createOffers(secondTracker);
+    await higher.createOffers();
+    await higher.createOffers();
     assert.equal(higher.pendingOffers.size, 2);
 
     await higher.receiveOffer(
@@ -459,6 +499,59 @@ test("passes send safeguards to the WebRTC transport", async () => {
     assert.equal(peer.fallbackMaxMessageSize, 123);
     assert.equal(peer.maxBufferedAmount, 456);
     peer.destroy();
+    provider.destroy();
+});
+test("offer collection timeout cancels ICE without peer errors", async (context) => {
+    class GatheringPeerConnection extends FakePeerConnection {
+        iceGatheringState = "gathering";
+    }
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const provider = createProvider("collection-timeout", {
+        maxConns: 1,
+        numwant: 1,
+        offerTimeout: 200,
+        offerCollectionTimeout: 100,
+        RTCPeerConnection: GatheringPeerConnection,
+    });
+    await provider.ready;
+    const errors = [];
+    provider.on("peer-error", (error) => errors.push(error));
+    const creatingOffers = provider.createOffers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    context.mock.timers.tick(100);
+    const offers = await creatingOffers;
+    await Promise.resolve();
+
+    assert.deepEqual(offers, []);
+    assert.deepEqual(errors, []);
+    assert.equal(provider.pendingPeers.size, 0);
+    provider.destroy();
+});
+
+test("ICE fallback offer beats the separate collection deadline", async (context) => {
+    class GatheringPeerConnection extends FakePeerConnection {
+        iceGatheringState = "gathering";
+    }
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const provider = createProvider("ice-fallback", {
+        maxConns: 1,
+        numwant: 1,
+        offerTimeout: 100,
+        offerCollectionTimeout: 200,
+        RTCPeerConnection: GatheringPeerConnection,
+    });
+    await provider.ready;
+    const creatingOffers = provider.createOffers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    context.mock.timers.tick(100);
+    const offers = await creatingOffers;
+
+    assert.equal(offers.length, 1);
+    assert.deepEqual(offers[0].offer, { type: "offer", sdp: "partial-offer" });
     provider.destroy();
 });
 test("late Sync Step 2 from a removed peer cannot restore synced", async () => {

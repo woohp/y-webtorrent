@@ -139,3 +139,41 @@ test("reports send exceptions and returns false", async () => {
     assert.ok(errors.length >= 1);
     tracker.destroy();
 });
+test("validates, floors, and jitters tracker announce intervals", async (context) => {
+    MockWebSocket.sockets.length = 0;
+    let random = 0;
+    context.mock.method(Math, "random", () => random);
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const tracker = createTracker();
+    const socket = MockWebSocket.sockets[0];
+    socket.open();
+    await Promise.resolve();
+    socket.sent.length = 0;
+
+    for (const interval of [-1, Number.POSITIVE_INFINITY, "1"]) {
+        tracker.scheduleAnnounce(interval);
+        assert.equal(tracker.announceTimer, undefined);
+    }
+
+    tracker.scheduleAnnounce(30);
+    assert.ok(tracker.announceTimer);
+    tracker.scheduleAnnounce(3_000_000);
+    assert.equal(tracker.announceTimer, undefined);
+
+    tracker.scheduleAnnounce(1);
+    context.mock.timers.tick(29_999);
+    assert.equal(socket.sent.length, 0);
+    context.mock.timers.tick(1);
+    await Promise.resolve();
+    assert.equal(socket.sent.length, 1);
+
+    socket.sent.length = 0;
+    random = 0.5;
+    tracker.scheduleAnnounce(1);
+    context.mock.timers.tick(31_499);
+    assert.equal(socket.sent.length, 0);
+    context.mock.timers.tick(1);
+    await Promise.resolve();
+    assert.equal(socket.sent.length, 1);
+    tracker.destroy();
+});

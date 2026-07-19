@@ -14,6 +14,8 @@ const provider = new WebtorrentProvider("room-name", doc, {
 
 Trackers only exchange WebRTC offers/answers. Yjs document updates are sent peer-to-peer over WebRTC and are not stored by the tracker.
 
+Tracker signaling is unauthenticated. Public or malicious trackers can observe signaling, substitute WebRTC endpoints, impersonate peers, and potentially gain access to document traffic through those substituted connections. Room names select swarms; they are not secrets or access-control credentials.
+
 ## Directed messages
 
 Applications can send transient binary data to one connected peer without adding it to the shared Yjs document:
@@ -26,16 +28,16 @@ provider.on("direct-message", (peerId, data) => {
 });
 ```
 
-`sendToPeer` returns `false` when the peer is missing or disconnected, the frame or buffering limit is exceeded, or the browser rejects the send. Transport failures are also reported through `peer-error`. Directed messages are not persisted, retried, or forwarded to other peers.
+`sendToPeer` returns `false` when the peer is missing or disconnected, the frame or buffering limit is exceeded, or the browser rejects the send. Transport failures may also be reported through `peer-error`. Directed messages are best-effort: failures do not destroy the peer or trigger reconnection, and messages are not persisted, retried, or forwarded. Yjs protocol-send failures remain destructive so a later tracker exchange can repair synchronization.
 
 ## Options
 
 - `trackers`: WebSocket tracker URLs.
-- `password`: optional shared secret included in the room hash derivation.
 - `awareness`: optional `y-protocols/awareness` instance.
 - `maxConns`: maximum WebRTC peers, default `20`.
 - `numwant`: offers to create per tracker announce, default `3`.
-- `offerTimeout`: max milliseconds to wait for local WebRTC offers before announcing, default `5000`.
+- `offerTimeout`: max milliseconds to wait for ICE gathering before using the current local description, default `5000`.
+- `offerCollectionTimeout`: outer deadline for all native offer-creation work, default `offerTimeout + 5000`.
 - `signalTimeout`: max milliseconds for a signaled peer to open, default `15000`.
 - `trackerConnectTimeout`: max milliseconds for a tracker WebSocket to open, default `10000`.
 - `fallbackMaxMessageSize`: single-frame limit when SCTP does not report one, default `256` KiB.

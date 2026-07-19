@@ -1,3 +1,6 @@
+const minimumAnnounceIntervalSeconds = 30;
+const maximumTimerDelay = 2_147_483_647;
+
 export const defaultTrackerUrls = [
     "wss://tracker.openwebtorrent.com",
     "wss://tracker.btorrent.xyz",
@@ -204,7 +207,7 @@ export class TrackerConnection {
         ) {
             return;
         }
-        if (message.interval) this.scheduleAnnounce(message.interval);
+        if (message.interval !== undefined) this.scheduleAnnounce(message.interval);
         if ("complete" in message || "incomplete" in message) this.onAnnounce(message);
         if (message.offer && message.offer_id && message.peer_id) {
             this.onOffer(message.peer_id, message.offer_id, message.offer, this);
@@ -213,11 +216,25 @@ export class TrackerConnection {
         }
     }
 
-    scheduleAnnounce(intervalSeconds: number): void {
+    scheduleAnnounce(intervalSeconds: unknown): void {
+        if (
+            typeof intervalSeconds !== "number" ||
+            !Number.isFinite(intervalSeconds) ||
+            intervalSeconds <= 0
+        ) {
+            return;
+        }
+        const seconds = Math.max(intervalSeconds, minimumAnnounceIntervalSeconds);
+        const delay = seconds * 1000 * (1 + Math.random() * 0.1);
+        if (delay > maximumTimerDelay) {
+            clearTimeout(this.announceTimer);
+            this.announceTimer = undefined;
+            return;
+        }
         clearTimeout(this.announceTimer);
         this.announceTimer = setTimeout(() => {
             void this.announce().catch((error: unknown) => this.onError(error));
-        }, intervalSeconds * 1000);
+        }, delay);
     }
 
     scheduleReconnect(): void {

@@ -32,7 +32,6 @@ const messageDirect = 4;
 
 type PendingOffer = {
     peer: WebrtcDataPeer;
-    tracker: TrackerConnection;
     canceled: boolean;
 };
 type OfferRecord = PendingOffer & { offerId: OfferId; offered: boolean };
@@ -42,11 +41,11 @@ type AwarenessUpdateHandler = (update: AwarenessUpdate, origin: unknown) => void
 
 export interface WebtorrentProviderOptions {
     trackers?: readonly string[];
-    password?: string;
     awareness?: Awareness;
     maxConns?: number;
     numwant?: number;
     offerTimeout?: number;
+    offerCollectionTimeout?: number;
     signalTimeout?: number;
     trackerConnectTimeout?: number;
     fallbackMaxMessageSize?: number;
@@ -100,10 +99,10 @@ export class WebtorrentProvider extends Observable<string> {
     readonly roomName: string;
     readonly doc: Y.Doc;
     readonly trackers: readonly string[];
-    readonly password: string;
     readonly maxConns: number;
     readonly numwant: number;
     readonly offerTimeout: number;
+    readonly offerCollectionTimeout: number;
     readonly signalTimeout: number;
     readonly trackerConnectTimeout: number;
     readonly fallbackMaxMessageSize: number;
@@ -140,10 +139,10 @@ export class WebtorrentProvider extends Observable<string> {
         this.roomName = roomName;
         this.doc = doc;
         this.trackers = opts.trackers || defaultTrackerUrls;
-        this.password = opts.password || "";
         this.maxConns = opts.maxConns ?? 20;
         this.numwant = opts.numwant ?? Math.min(3, Math.max(1, this.maxConns));
         this.offerTimeout = opts.offerTimeout ?? 5000;
+        this.offerCollectionTimeout = opts.offerCollectionTimeout ?? this.offerTimeout + 5000;
         this.signalTimeout = opts.signalTimeout ?? 15000;
         this.trackerConnectTimeout = opts.trackerConnectTimeout ?? 10000;
         this.fallbackMaxMessageSize = opts.fallbackMaxMessageSize ?? 256 * 1024;
@@ -193,7 +192,7 @@ export class WebtorrentProvider extends Observable<string> {
     }
 
     private async initializeConnection(generation: number): Promise<void> {
-        const infoHash = await createInfoHash(this.roomName, this.password);
+        const infoHash = await createInfoHash(this.roomName);
         if (!this.isCurrentGeneration(generation)) return;
         this.infoHash = infoHash;
 
@@ -204,8 +203,7 @@ export class WebtorrentProvider extends Observable<string> {
                     infoHash,
                     peerId: this.peerId,
                     numwant: this.numwant,
-                    createOffers: (tracker: TrackerConnection) =>
-                        this.createOffers(tracker, generation),
+                    createOffers: () => this.createOffers(generation),
                     onOffer: (
                         peerId: PeerId,
                         offerId: OfferId,
@@ -249,10 +247,7 @@ export class WebtorrentProvider extends Observable<string> {
         }
     }
 
-    async createOffers(
-        tracker: TrackerConnection,
-        generation: number = this.connectionGeneration,
-    ): Promise<TrackerOffer[]> {
+    async createOffers(generation: number = this.connectionGeneration): Promise<TrackerOffer[]> {
         if (!this.isCurrentGeneration(generation)) return [];
         const capacity = Math.max(0, this.maxConns - this.peers.size - this.pendingPeers.size);
         const count = Math.min(this.numwant, capacity);
@@ -272,7 +267,6 @@ export class WebtorrentProvider extends Observable<string> {
             const record: OfferRecord = {
                 offerId,
                 peer,
-                tracker,
                 offered: false,
                 canceled: false,
             };
@@ -287,9 +281,14 @@ export class WebtorrentProvider extends Observable<string> {
             );
         }
 
-        const offers = await collectOffers(records, offerPromises, this.offerTimeout, (error) => {
-            if (this.isCurrentGeneration(generation)) this.emit("peer-error", [error]);
-        });
+        const offers = await collectOffers(
+            records,
+            offerPromises,
+            this.offerCollectionTimeout,
+            (error) => {
+                if (this.isCurrentGeneration(generation)) this.emit("peer-error", [error]);
+            },
+        );
 
         if (!this.isCurrentGeneration(generation)) {
             for (const record of records) this.cancelPendingPeer(record.peer);
@@ -371,6 +370,9 @@ export class WebtorrentProvider extends Observable<string> {
             }
             this.startPeerTimeout(peer);
         } catch (error) {
+            if (!this.isCurrentGeneration(generation) || this.pendingPeerIds.get(peerId) !== peer) {
+                return;
+            }
             this.emit("peer-error", [error]);
             this.cancelPendingPeer(peer);
         }
@@ -406,6 +408,11 @@ export class WebtorrentProvider extends Observable<string> {
             }
         }
 
+        if (this.peers.size >= this.maxConns) {
+            this.cancelPendingPeer(pending.peer);
+            return;
+        }
+
         this.pendingOffers.delete(offerId);
         this.clearPeerTimeout(pending.peer);
         this.peerIds.set(pending.peer, peerId);
@@ -421,6 +428,12 @@ export class WebtorrentProvider extends Observable<string> {
             }
             this.startPeerTimeout(pending.peer);
         } catch (error) {
+            if (
+                !this.isCurrentGeneration(generation) ||
+                this.pendingPeerIds.get(peerId) !== pending.peer
+            ) {
+                return;
+            }
             this.emit("peer-error", [error]);
             this.cancelPendingPeer(pending.peer);
         }
@@ -473,6 +486,10 @@ export class WebtorrentProvider extends Observable<string> {
         }
         const existing = this.peers.get(peerId);
         if (existing && existing !== peer) {
+            this.cancelPendingPeer(peer);
+            return;
+        }
+        if (!existing && this.peers.size >= this.maxConns) {
             this.cancelPendingPeer(peer);
             return;
         }
@@ -681,9 +698,10 @@ const collectOffers = async (
             Promise.all(
                 offerPromises.map((promise, index) =>
                     promise.catch((error) => {
-                        onError(error);
-                        records[index]!.canceled = true;
-                        records[index]!.peer.destroy();
+                        const record = records[index]!;
+                        if (!record.canceled) onError(error);
+                        record.canceled = true;
+                        record.peer.destroy();
                     }),
                 ),
             ),

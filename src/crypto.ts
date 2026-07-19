@@ -6,9 +6,8 @@ export const binaryStringFromBytes = (bytes: Uint8Array): string => {
     return out;
 };
 
-export const createInfoHash = async (roomName: string, password = ""): Promise<string> => {
-    const input = password ? `${password}:${roomName}` : roomName;
-    const digest = await crypto.subtle.digest("SHA-1", textEncoder.encode(input));
+export const createInfoHash = async (roomName: string): Promise<string> => {
+    const digest = await crypto.subtle.digest("SHA-1", textEncoder.encode(roomName));
     return binaryStringFromBytes(new Uint8Array(digest));
 };
 
