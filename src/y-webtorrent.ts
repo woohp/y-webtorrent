@@ -212,6 +212,7 @@ export class WebtorrentProvider extends Observable<string> {
                     peerId: this.peerId,
                     numwant: this.numwant,
                     createOffers: () => this.createOffers(generation),
+                    cancelOffers: (offerIds: readonly OfferId[]) => this.cancelOffers(offerIds),
                     onOffer: (
                         peerId: PeerId,
                         offerId: OfferId,
@@ -313,6 +314,13 @@ export class WebtorrentProvider extends Observable<string> {
 
         this.emitDebug({ type: "offers-created", count: offers.length, requested: count });
         return offers;
+    }
+
+    cancelOffers(offerIds: readonly OfferId[]): void {
+        for (const offerId of offerIds) {
+            const pending = this.pendingOffers.get(offerId);
+            if (pending) this.cancelPendingPeer(pending.peer);
+        }
     }
 
     async receiveOffer(
@@ -426,10 +434,12 @@ export class WebtorrentProvider extends Observable<string> {
         this.pendingPeerIds.set(peerId, pending.peer);
         try {
             await pending.peer.acceptAnswer(answer);
-            if (
-                !this.isCurrentGeneration(generation) ||
-                this.pendingPeerIds.get(peerId) !== pending.peer
-            ) {
+            if (!this.isCurrentGeneration(generation)) {
+                this.cancelPendingPeer(pending.peer);
+                return;
+            }
+            if (this.peers.get(peerId) === pending.peer) return;
+            if (this.pendingPeerIds.get(peerId) !== pending.peer) {
                 this.cancelPendingPeer(pending.peer);
                 return;
             }
@@ -664,6 +674,7 @@ export class WebtorrentProvider extends Observable<string> {
             if (pending.peer !== peer) continue;
             pending.canceled = true;
             this.pendingOffers.delete(offerId);
+            for (const tracker of this.trackerConnections) tracker.forgetOffer(offerId);
         }
     }
 

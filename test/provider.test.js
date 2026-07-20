@@ -342,6 +342,50 @@ test("lower peer replaces a pending inbound duplicate with its outbound peer", a
     lower.destroy();
 });
 
+test("peer opening during answer acceptance is preserved", async () => {
+    const provider = createProvider("early-open", { maxConns: 1, numwant: 1 });
+    await provider.ready;
+    const peers = installSignalingPeers(provider);
+    const [offer] = await provider.createOffers();
+    const peer = peers[0];
+    peer.acceptAnswer = async () => {
+        peer.connected = true;
+        provider.onPeerOpen(peer, true);
+    };
+
+    await provider.receiveAnswer("remote", offer.offer_id, {
+        type: "answer",
+        sdp: "answer",
+    });
+
+    assert.equal(peer.destroyed, false);
+    assert.equal(provider.peers.get("remote"), peer);
+    assert.equal(provider.pendingPeers.size, 0);
+    assert.equal(provider.pendingPeerIds.size, 0);
+    provider.destroy();
+});
+
+test("canceling an unpublished offer batch restores capacity", async () => {
+    const provider = createProvider("cancel-offer-batch", { maxConns: 1, numwant: 1 });
+    await provider.ready;
+    installSignalingPeers(provider);
+    const forgotten = [];
+    provider.trackerConnections.push({
+        forgetOffer: (offerId) => forgotten.push(offerId),
+        destroy: () => {},
+    });
+    const [offer] = await provider.createOffers();
+
+    provider.cancelOffers([offer.offer_id]);
+
+    assert.equal(provider.pendingOffers.size, 0);
+    assert.equal(provider.pendingPeers.size, 0);
+    assert.equal(provider.pendingPeerIds.size, 0);
+    assert.deepEqual(forgotten, [offer.offer_id]);
+    const replacements = await provider.createOffers();
+    assert.equal(replacements.length, 1);
+    provider.destroy();
+});
 test("canceled outbound peer cannot regain a timeout after acceptAnswer resolves", async () => {
     const higher = createProvider("b".repeat(20), { maxConns: 1, numwant: 1 });
     await higher.ready;

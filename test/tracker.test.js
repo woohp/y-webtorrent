@@ -100,6 +100,100 @@ test("times out sockets that never open", (context) => {
     tracker.destroy();
 });
 
+test("cancels sent offers when their socket closes and announces replacements", async () => {
+    MockWebSocket.sockets.length = 0;
+    let createCount = 0;
+    const canceled = [];
+    const tracker = createTracker({
+        createOffers: () => {
+            createCount++;
+            const id = createCount === 1 ? "sent" : "replacement";
+            return [{ offer_id: id, offer: { type: "offer", sdp: id } }];
+        },
+        cancelOffers: (offerIds) => canceled.push(...offerIds),
+    });
+    const firstSocket = MockWebSocket.sockets[0];
+    firstSocket.open();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(firstSocket.sent[0].offers[0].offer_id, "sent");
+
+    firstSocket.close();
+    assert.deepEqual(canceled, ["sent"]);
+
+    tracker.connect();
+    const replacementSocket = MockWebSocket.sockets.at(-1);
+    replacementSocket.open();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(replacementSocket.sent[0].offers[0].offer_id, "replacement");
+    tracker.destroy();
+    assert.deepEqual(canceled, ["sent", "replacement"]);
+});
+
+test("forgets an announced offer when its answer arrives", async () => {
+    MockWebSocket.sockets.length = 0;
+    const answers = [];
+    const tracker = createTracker({
+        createOffers: () => [{ offer_id: "answered", offer: { type: "offer", sdp: "offer" } }],
+        onAnswer: (_peerId, offerId) => answers.push(offerId),
+    });
+    const socket = MockWebSocket.sockets[0];
+    socket.open();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    socket.dispatch("message", {
+        data: JSON.stringify({
+            action: "announce",
+            info_hash: "info-hash",
+            peer_id: "remote",
+            offer_id: "answered",
+            answer: { type: "answer", sdp: "answer" },
+        }),
+    });
+    await Promise.resolve();
+
+    assert.deepEqual(answers, ["answered"]);
+    assert.equal(tracker.announcedOffers.size, 0);
+    tracker.destroy();
+});
+test("cancels stale offer batches and announces replacements after reconnect", async () => {
+    MockWebSocket.sockets.length = 0;
+    let resolveFirstOffers;
+    let createCount = 0;
+    const canceled = [];
+    const tracker = createTracker({
+        createOffers: () => {
+            createCount++;
+            if (createCount === 1) {
+                return new Promise((resolve) => (resolveFirstOffers = resolve));
+            }
+            return [{ offer_id: "replacement", offer: { type: "offer", sdp: "replacement" } }];
+        },
+        cancelOffers: (offerIds) => canceled.push(...offerIds),
+    });
+    const staleSocket = MockWebSocket.sockets[0];
+    staleSocket.open();
+    staleSocket.close();
+
+    resolveFirstOffers([{ offer_id: "stale", offer: { type: "offer", sdp: "stale" } }]);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(canceled, ["stale"]);
+
+    tracker.connect();
+    const replacementSocket = MockWebSocket.sockets.at(-1);
+    replacementSocket.open();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.deepEqual(replacementSocket.sent[0].offers, [
+        { offer_id: "replacement", offer: { type: "offer", sdp: "replacement" } },
+    ]);
+    tracker.destroy();
+});
 test("does not publish offers completed after destruction", async () => {
     MockWebSocket.sockets.length = 0;
     let resolveOffers;

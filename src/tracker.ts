@@ -37,6 +37,7 @@ export interface TrackerConnectionOptions {
     peerId: PeerId;
     numwant: number;
     createOffers: (tracker: TrackerConnection) => Promise<TrackerOffer[]> | TrackerOffer[];
+    cancelOffers?: (offerIds: readonly OfferId[]) => void;
     onOffer: (
         peerId: PeerId,
         offerId: OfferId,
@@ -56,6 +57,7 @@ export class TrackerConnection {
     readonly peerId: PeerId;
     readonly numwant: number;
     readonly createOffers: TrackerConnectionOptions["createOffers"];
+    readonly cancelOffers: NonNullable<TrackerConnectionOptions["cancelOffers"]>;
     readonly onOffer: TrackerConnectionOptions["onOffer"];
     readonly onAnswer: TrackerConnectionOptions["onAnswer"];
     readonly onAnnounce: NonNullable<TrackerConnectionOptions["onAnnounce"]>;
@@ -68,6 +70,7 @@ export class TrackerConnection {
     announceTimer: ReturnType<typeof setTimeout> | undefined;
     reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     connectTimer: ReturnType<typeof setTimeout> | undefined;
+    private readonly announcedOffers = new Map<WebSocket, Set<OfferId>>();
 
     constructor(url: string, opts: TrackerConnectionOptions) {
         const parsedUrl = new URL(url);
@@ -79,6 +82,7 @@ export class TrackerConnection {
         this.peerId = opts.peerId;
         this.numwant = opts.numwant;
         this.createOffers = opts.createOffers;
+        this.cancelOffers = opts.cancelOffers ?? (() => {});
         this.onOffer = opts.onOffer;
         this.onAnswer = opts.onAnswer;
         this.onAnnounce = opts.onAnnounce ?? (() => {});
@@ -140,6 +144,7 @@ export class TrackerConnection {
             if (socket === this.socket && !this.destroyed) this.onError(event);
         });
         socket.addEventListener("close", () => {
+            this.cancelSocketOffers(socket);
             if (socket !== this.socket || this.destroyed) return;
             clearTimeout(this.connectTimer);
             this.connectTimer = undefined;
@@ -160,12 +165,49 @@ export class TrackerConnection {
             numwant: this.numwant,
         };
         if (event) message.event = event;
+        let offers: TrackerOffer[] = [];
         if (event !== "stopped") {
-            const offers = await this.createOffers(this);
-            if (socket !== this.socket || this.destroyed || !this.isOpen()) return false;
+            offers = await this.createOffers(this);
+            if (socket !== this.socket || this.destroyed || !this.isOpen()) {
+                this.cancelOfferBatch(offers);
+                return false;
+            }
             if (offers.length > 0) message.offers = offers;
         }
-        return this.send(message);
+        try {
+            const sent = this.send(message);
+            if (sent) this.trackOfferBatch(socket, offers);
+            else this.cancelOfferBatch(offers);
+            return sent;
+        } catch (error) {
+            this.cancelOfferBatch(offers);
+            throw error;
+        }
+    }
+
+    private trackOfferBatch(socket: WebSocket, offers: readonly TrackerOffer[]): void {
+        if (offers.length === 0) return;
+        const offerIds = this.announcedOffers.get(socket) ?? new Set<OfferId>();
+        for (const offer of offers) offerIds.add(offer.offer_id);
+        this.announcedOffers.set(socket, offerIds);
+    }
+
+    private cancelOfferBatch(offers: readonly TrackerOffer[]): void {
+        if (offers.length > 0) this.cancelOffers(offers.map((offer) => offer.offer_id));
+    }
+
+    private cancelSocketOffers(socket: WebSocket): void {
+        const offerIds = this.announcedOffers.get(socket);
+        if (!offerIds) return;
+        this.announcedOffers.delete(socket);
+        this.cancelOffers([...offerIds]);
+    }
+
+    forgetOffer(offerId: OfferId): void {
+        for (const [socket, offerIds] of this.announcedOffers) {
+            offerIds.delete(offerId);
+            if (offerIds.size === 0) this.announcedOffers.delete(socket);
+        }
     }
 
     sendAnswer(toPeerId: PeerId, offerId: OfferId, answer: TrackerSignal): boolean {
@@ -212,6 +254,7 @@ export class TrackerConnection {
         if (message.offer && message.offer_id && message.peer_id) {
             this.onOffer(message.peer_id, message.offer_id, message.offer, this);
         } else if (message.answer && message.offer_id && message.peer_id) {
+            this.forgetOffer(message.offer_id);
             this.onAnswer(message.peer_id, message.offer_id, message.answer);
         }
     }
@@ -276,6 +319,7 @@ export class TrackerConnection {
                 peer_id: this.peerId,
             });
         }
+        for (const socket of this.announcedOffers.keys()) this.cancelSocketOffers(socket);
         this.socket?.close();
         this.socket = null;
     }
