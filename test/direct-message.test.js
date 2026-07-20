@@ -41,10 +41,64 @@ globalThis.RTCPeerConnection = FakePeerConnection;
 
 const { WebtorrentProvider, defaultRtcConfig } = await import("../dist/index.js");
 
-function createProvider(peerId) {
-    return new WebtorrentProvider("test-room", new Y.Doc(), { peerId, trackers: [] });
+function createProvider(peerId, opts = {}) {
+    return new WebtorrentProvider("test-room", new Y.Doc(), {
+        peerId,
+        trackers: [],
+        ...opts,
+    });
 }
 
+test("validates provider numeric options at construction", () => {
+    for (const option of ["maxConns", "numwant"]) {
+        for (const value of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, "1"]) {
+            assert.throws(
+                () => createProvider(`invalid-${option}`, { [option]: value }),
+                new RegExp(option),
+            );
+        }
+    }
+    for (const option of [
+        "offerTimeout",
+        "offerCollectionTimeout",
+        "signalTimeout",
+        "trackerConnectTimeout",
+        "announceResponseTimeout",
+    ]) {
+        for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648, "1"]) {
+            assert.throws(
+                () => createProvider(`invalid-${option}`, { [option]: value }),
+                new RegExp(option),
+            );
+        }
+    }
+    for (const option of ["fallbackMaxMessageSize", "maxBufferedAmount"]) {
+        for (const value of [-1, Number.NaN, "1"]) {
+            assert.throws(
+                () => createProvider(`invalid-${option}`, { [option]: value }),
+                new RegExp(option),
+            );
+        }
+    }
+    assert.throws(
+        () => createProvider("computed-timeout-overflow", { offerTimeout: 2_147_483_647 }),
+        /offerCollectionTimeout/,
+    );
+
+    const provider = createProvider("numeric-boundaries", {
+        maxConns: 0,
+        numwant: 0,
+        offerTimeout: 2_147_483_647,
+        offerCollectionTimeout: 2_147_483_647,
+        signalTimeout: 0,
+        trackerConnectTimeout: 0,
+        announceResponseTimeout: 0,
+        fallbackMaxMessageSize: Number.POSITIVE_INFINITY,
+        maxBufferedAmount: Number.POSITIVE_INFINITY,
+    });
+    assert.equal(provider.announceResponseTimeout, 0);
+    provider.destroy();
+});
 test("uses isolated public STUN defaults and allows rtcConfig overrides", () => {
     const provider = createProvider("default-rtc");
     const otherDefault = createProvider("other-default-rtc");

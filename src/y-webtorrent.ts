@@ -33,6 +33,32 @@ const cloneDefaultRtcConfig = (): RTCConfiguration => {
     return { ...defaultRtcConfig, ...(iceServers ? { iceServers } : {}) };
 };
 
+const maximumTimerDelay = 2_147_483_647;
+
+const validateCount = (name: string, value: number): number => {
+    if (typeof value !== "number") throw new TypeError(`${name} must be a number`);
+    if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+        throw new RangeError(`${name} must be a finite, non-negative integer`);
+    }
+    return value;
+};
+
+const validateTimeout = (name: string, value: number): number => {
+    if (typeof value !== "number") throw new TypeError(`${name} must be a number`);
+    if (!Number.isFinite(value) || value < 0 || value > maximumTimerDelay) {
+        throw new RangeError(`${name} must be between 0 and ${maximumTimerDelay}`);
+    }
+    return value;
+};
+
+const validateLimit = (name: string, value: number): number => {
+    if (typeof value !== "number") throw new TypeError(`${name} must be a number`);
+    if (Number.isNaN(value) || value < 0) {
+        throw new RangeError(`${name} must be non-negative or Infinity`);
+    }
+    return value;
+};
+
 const messageSync = 0;
 const messageAwareness = 1;
 const messageQueryAwareness = 3;
@@ -56,6 +82,7 @@ export interface WebtorrentProviderOptions {
     offerCollectionTimeout?: number;
     signalTimeout?: number;
     trackerConnectTimeout?: number;
+    announceResponseTimeout?: number;
     fallbackMaxMessageSize?: number;
     maxBufferedAmount?: number;
     rtcConfig?: RTCConfiguration | undefined;
@@ -113,6 +140,7 @@ export class WebtorrentProvider extends Observable<string> {
     readonly offerCollectionTimeout: number;
     readonly signalTimeout: number;
     readonly trackerConnectTimeout: number;
+    readonly announceResponseTimeout: number;
     readonly fallbackMaxMessageSize: number;
     readonly maxBufferedAmount: number;
     readonly rtcConfig: RTCConfiguration;
@@ -147,14 +175,33 @@ export class WebtorrentProvider extends Observable<string> {
         this.roomName = roomName;
         this.doc = doc;
         this.trackers = opts.trackers || defaultTrackerUrls;
-        this.maxConns = opts.maxConns ?? 20;
-        this.numwant = opts.numwant ?? Math.min(3, Math.max(1, this.maxConns));
-        this.offerTimeout = opts.offerTimeout ?? 5000;
-        this.offerCollectionTimeout = opts.offerCollectionTimeout ?? this.offerTimeout + 5000;
-        this.signalTimeout = opts.signalTimeout ?? 15000;
-        this.trackerConnectTimeout = opts.trackerConnectTimeout ?? 10000;
-        this.fallbackMaxMessageSize = opts.fallbackMaxMessageSize ?? 256 * 1024;
-        this.maxBufferedAmount = opts.maxBufferedAmount ?? 4 * 1024 * 1024;
+        this.maxConns = validateCount("maxConns", opts.maxConns ?? 20);
+        this.numwant = validateCount(
+            "numwant",
+            opts.numwant ?? Math.min(3, Math.max(1, this.maxConns)),
+        );
+        this.offerTimeout = validateTimeout("offerTimeout", opts.offerTimeout ?? 5000);
+        this.offerCollectionTimeout = validateTimeout(
+            "offerCollectionTimeout",
+            opts.offerCollectionTimeout ?? this.offerTimeout + 5000,
+        );
+        this.signalTimeout = validateTimeout("signalTimeout", opts.signalTimeout ?? 15000);
+        this.trackerConnectTimeout = validateTimeout(
+            "trackerConnectTimeout",
+            opts.trackerConnectTimeout ?? 10000,
+        );
+        this.announceResponseTimeout = validateTimeout(
+            "announceResponseTimeout",
+            opts.announceResponseTimeout ?? 15000,
+        );
+        this.fallbackMaxMessageSize = validateLimit(
+            "fallbackMaxMessageSize",
+            opts.fallbackMaxMessageSize ?? 256 * 1024,
+        );
+        this.maxBufferedAmount = validateLimit(
+            "maxBufferedAmount",
+            opts.maxBufferedAmount ?? 4 * 1024 * 1024,
+        );
         this.rtcConfig = opts.rtcConfig ?? cloneDefaultRtcConfig();
         this.channelName = opts.channelName ?? "y-webtorrent";
         this.peerId = opts.peerId || createPeerId();
@@ -247,6 +294,7 @@ export class WebtorrentProvider extends Observable<string> {
                         }
                     },
                     connectTimeout: this.trackerConnectTimeout,
+                    announceResponseTimeout: this.announceResponseTimeout,
                     ...(this._WebSocket ? { WebSocket: this._WebSocket } : {}),
                 };
                 this.trackerConnections.push(new TrackerConnection(url, trackerOptions));

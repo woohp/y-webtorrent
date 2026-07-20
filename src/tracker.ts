@@ -1,4 +1,5 @@
 const minimumAnnounceIntervalSeconds = 30;
+const fallbackAnnounceIntervalSeconds = 120;
 const maximumTimerDelay = 2_147_483_647;
 
 export const defaultTrackerUrls = [
@@ -30,6 +31,8 @@ export interface TrackerAnnounceMessage {
     interval?: number;
     complete?: number;
     incomplete?: number;
+    "failure reason"?: string;
+    "warning message"?: string;
 }
 
 export interface TrackerConnectionOptions {
@@ -48,6 +51,7 @@ export interface TrackerConnectionOptions {
     onAnnounce?: (message: TrackerAnnounceMessage) => void;
     onError?: (error: unknown) => void;
     connectTimeout?: number;
+    announceResponseTimeout?: number;
     WebSocket?: typeof WebSocket;
 }
 
@@ -64,12 +68,15 @@ export class TrackerConnection {
     readonly onError: NonNullable<TrackerConnectionOptions["onError"]>;
     readonly WebSocket?: typeof WebSocket;
     readonly connectTimeout: number;
+    readonly announceResponseTimeout: number;
     destroyed = false;
     reconnectDelay = 1000;
     socket: WebSocket | null = null;
     announceTimer: ReturnType<typeof setTimeout> | undefined;
     reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     connectTimer: ReturnType<typeof setTimeout> | undefined;
+    announceResponseTimer: ReturnType<typeof setTimeout> | undefined;
+    private announceResponseSocket: WebSocket | null = null;
     private readonly announcedOffers = new Map<WebSocket, Set<OfferId>>();
 
     constructor(url: string, opts: TrackerConnectionOptions) {
@@ -88,7 +95,11 @@ export class TrackerConnection {
         this.onAnnounce = opts.onAnnounce ?? (() => {});
         this.onError = opts.onError ?? (() => {});
         this.WebSocket = opts.WebSocket ?? globalThis.WebSocket;
-        this.connectTimeout = opts.connectTimeout ?? 10000;
+        this.connectTimeout = validateTimeout("connectTimeout", opts.connectTimeout ?? 10000);
+        this.announceResponseTimeout = validateTimeout(
+            "announceResponseTimeout",
+            opts.announceResponseTimeout ?? 15000,
+        );
         this.connect();
     }
 
@@ -131,7 +142,6 @@ export class TrackerConnection {
             if (socket !== this.socket || this.destroyed) return;
             clearTimeout(this.connectTimer);
             this.connectTimer = undefined;
-            this.reconnectDelay = 1000;
             void this.announce("started", socket).catch((error: unknown) => this.onError(error));
         });
         socket.addEventListener("message", (event) => {
@@ -145,6 +155,7 @@ export class TrackerConnection {
         });
         socket.addEventListener("close", () => {
             this.cancelSocketOffers(socket);
+            this.clearAnnounceResponseTimeout(socket);
             if (socket !== this.socket || this.destroyed) return;
             clearTimeout(this.connectTimer);
             this.connectTimer = undefined;
@@ -176,13 +187,49 @@ export class TrackerConnection {
         }
         try {
             const sent = this.send(message);
-            if (sent) this.trackOfferBatch(socket, offers);
-            else this.cancelOfferBatch(offers);
+            if (sent) {
+                this.trackOfferBatch(socket, offers);
+                if (event !== "stopped") this.startAnnounceResponseTimeout(socket);
+            } else {
+                this.cancelOfferBatch(offers);
+            }
             return sent;
         } catch (error) {
             this.cancelOfferBatch(offers);
             throw error;
         }
+    }
+
+    private startAnnounceResponseTimeout(socket: WebSocket): void {
+        this.clearAnnounceResponseTimeout();
+        this.announceResponseSocket = socket;
+        this.announceResponseTimer = setTimeout(() => {
+            if (
+                this.destroyed ||
+                socket !== this.socket ||
+                socket !== this.announceResponseSocket
+            ) {
+                if (socket === this.announceResponseSocket) {
+                    this.announceResponseTimer = undefined;
+                    this.announceResponseSocket = null;
+                }
+                return;
+            }
+            this.announceResponseTimer = undefined;
+            this.announceResponseSocket = null;
+            try {
+                this.onError(new Error(`Tracker announce response timed out: ${this.url}`));
+            } finally {
+                socket.close();
+            }
+        }, this.announceResponseTimeout);
+    }
+
+    private clearAnnounceResponseTimeout(socket?: WebSocket): void {
+        if (socket && socket !== this.announceResponseSocket) return;
+        clearTimeout(this.announceResponseTimer);
+        this.announceResponseTimer = undefined;
+        this.announceResponseSocket = null;
     }
 
     private trackOfferBatch(socket: WebSocket, offers: readonly TrackerOffer[]): void {
@@ -241,15 +288,31 @@ export class TrackerConnection {
             return;
         }
 
-        if (
-            !message ||
-            typeof message !== "object" ||
-            message.action !== "announce" ||
-            message.info_hash !== this.infoHash
-        ) {
+        if (!message || typeof message !== "object" || message.action !== "announce") return;
+
+        const failure = message["failure reason"];
+        if (typeof failure === "string") {
+            this.clearAnnounceResponseTimeout(socket);
+            try {
+                this.onError(new Error(`Tracker failure: ${failure}`));
+            } finally {
+                socket.close();
+            }
             return;
         }
-        if (message.interval !== undefined) this.scheduleAnnounce(message.interval);
+        if (message.info_hash !== this.infoHash) return;
+
+        this.clearAnnounceResponseTimeout(socket);
+        this.reconnectDelay = 1000;
+        const hasAnnounceMetadata =
+            message.interval !== undefined || "complete" in message || "incomplete" in message;
+        if (hasAnnounceMetadata) {
+            this.scheduleAnnounce(message.interval);
+        } else if (!this.announceTimer) {
+            this.scheduleAnnounce(undefined);
+        }
+        const warning = message["warning message"];
+        if (typeof warning === "string") this.onError(new Error(`Tracker warning: ${warning}`));
         if ("complete" in message || "incomplete" in message) this.onAnnounce(message);
         if (message.offer && message.offer_id && message.peer_id) {
             this.onOffer(message.peer_id, message.offer_id, message.offer, this);
@@ -260,28 +323,31 @@ export class TrackerConnection {
     }
 
     scheduleAnnounce(intervalSeconds: unknown): void {
-        if (
-            typeof intervalSeconds !== "number" ||
-            !Number.isFinite(intervalSeconds) ||
-            intervalSeconds <= 0
-        ) {
-            return;
-        }
-        const seconds = Math.max(intervalSeconds, minimumAnnounceIntervalSeconds);
-        const delay = seconds * 1000 * (1 + Math.random() * 0.1);
-        if (delay > maximumTimerDelay) {
-            clearTimeout(this.announceTimer);
-            this.announceTimer = undefined;
-            return;
-        }
-        clearTimeout(this.announceTimer);
+        const requestedSeconds =
+            typeof intervalSeconds === "number" &&
+            Number.isFinite(intervalSeconds) &&
+            intervalSeconds > 0
+                ? Math.max(intervalSeconds, minimumAnnounceIntervalSeconds)
+                : fallbackAnnounceIntervalSeconds;
+        const requestedDelay = requestedSeconds * 1000 * (1 + Math.random() * 0.1);
+        const delay =
+            requestedDelay <= maximumTimerDelay
+                ? requestedDelay
+                : fallbackAnnounceIntervalSeconds * 1000 * (1 + Math.random() * 0.1);
+        this.clearAnnounceTimer();
         this.announceTimer = setTimeout(() => {
+            this.announceTimer = undefined;
             void this.announce().catch((error: unknown) => this.onError(error));
         }, delay);
     }
 
-    scheduleReconnect(): void {
+    private clearAnnounceTimer(): void {
         clearTimeout(this.announceTimer);
+        this.announceTimer = undefined;
+    }
+
+    scheduleReconnect(): void {
+        this.clearAnnounceTimer();
         if (this.destroyed) return;
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
@@ -307,10 +373,11 @@ export class TrackerConnection {
     destroy(): void {
         if (this.destroyed) return;
         this.destroyed = true;
-        clearTimeout(this.announceTimer);
+        this.clearAnnounceTimer();
         clearTimeout(this.reconnectTimer);
         clearTimeout(this.connectTimer);
         this.connectTimer = undefined;
+        this.clearAnnounceResponseTimeout();
         if (this.isOpen()) {
             this.send({
                 action: "announce",
@@ -324,3 +391,11 @@ export class TrackerConnection {
         this.socket = null;
     }
 }
+
+const validateTimeout = (name: string, value: number): number => {
+    if (typeof value !== "number") throw new TypeError(`${name} must be a number`);
+    if (!Number.isFinite(value) || value < 0 || value > maximumTimerDelay) {
+        throw new RangeError(`${name} must be between 0 and ${maximumTimerDelay}`);
+    }
+    return value;
+};

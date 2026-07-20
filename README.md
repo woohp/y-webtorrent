@@ -40,6 +40,7 @@ provider.on("direct-message", (peerId, data) => {
 - `offerCollectionTimeout`: outer deadline for all native offer-creation work, default `offerTimeout + 5000`.
 - `signalTimeout`: max milliseconds for a signaled peer to open, default `15000`.
 - `trackerConnectTimeout`: max milliseconds for a tracker WebSocket to open, default `10000`.
+- `announceResponseTimeout`: max milliseconds for a tracker to answer an announce before reconnecting, default `15000`; `0` requests an immediate timeout.
 - `fallbackMaxMessageSize`: single-frame limit when SCTP does not report one, default `256` KiB.
 - `maxBufferedAmount`: data-channel buffering ceiling, default `4` MiB.
 - `rtcConfig`: optional `RTCPeerConnection` configuration. By default, connections use Google and Cloudflare public STUN servers for NAT traversal. Pass `{ iceServers: [] }` to disable them or provide your own STUN/TURN servers.
@@ -47,6 +48,8 @@ provider.on("direct-message", (peerId, data) => {
 - `debug`: emit verbose `debug` events, default `false`.
 - `WebSocket`: injectable WebSocket constructor, mostly for tests/non-browser runtimes.
 - `RTCPeerConnection`: injectable WebRTC constructor for tests/non-browser runtimes.
+
+Counts must be finite, non-negative integers. Timeouts must be between `0` and `2147483647` milliseconds. Send limits must be non-negative numbers and may be `Infinity`. Tracker-requested announce intervals use a 30-second minimum and up to 10% positive jitter; valid responses without a schedulable interval use a conservative 120-second fallback.
 
 ## Build
 
