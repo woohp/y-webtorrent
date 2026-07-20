@@ -104,6 +104,7 @@ const readMessage = (
     peerId: PeerId | null,
     data: ArrayBuffer,
     sendProtocolMessage: (message: Uint8Array<ArrayBuffer>) => boolean,
+    sendAwareness: () => boolean,
 ): boolean => {
     const decoder = decoding.createDecoder(new Uint8Array(data));
     const encoder = encoding.createEncoder();
@@ -123,7 +124,7 @@ const readMessage = (
             peer,
         );
     } else if (messageType === messageQueryAwareness) {
-        provider.sendAwareness(peer);
+        sendAwareness();
     } else if (messageType === messageDirect && peerId) {
         provider.emit("direct-message", [peerId, decoding.readVarUint8Array(decoder)]);
     }
@@ -152,9 +153,9 @@ export class WebtorrentProvider extends Observable<string> {
     shouldConnect = true;
     synced = false;
     infoHash: string | null = null;
-    trackerConnections: TrackerConnection[] = [];
-    peers: Map<PeerId, WebrtcDataPeer> = new Map();
-    pendingOffers: Map<OfferId, PendingOffer> = new Map();
+    private trackerConnections: TrackerConnection[] = [];
+    private peers: Map<PeerId, WebrtcDataPeer> = new Map();
+    private pendingOffers: Map<OfferId, PendingOffer> = new Map();
     private readonly pendingPeerIds = new Map<PeerId, WebrtcDataPeer>();
     private readonly pendingPeers = new Set<WebrtcDataPeer>();
     private readonly pendingTimers = new Map<WebrtcDataPeer, ReturnType<typeof setTimeout>>();
@@ -304,7 +305,9 @@ export class WebtorrentProvider extends Observable<string> {
         }
     }
 
-    async createOffers(generation: number = this.connectionGeneration): Promise<TrackerOffer[]> {
+    private async createOffers(
+        generation: number = this.connectionGeneration,
+    ): Promise<TrackerOffer[]> {
         if (!this.isCurrentGeneration(generation)) return [];
         const capacity = Math.max(0, this.maxConns - this.peers.size - this.pendingPeers.size);
         const count = Math.min(this.numwant, capacity);
@@ -364,14 +367,14 @@ export class WebtorrentProvider extends Observable<string> {
         return offers;
     }
 
-    cancelOffers(offerIds: readonly OfferId[]): void {
+    private cancelOffers(offerIds: readonly OfferId[]): void {
         for (const offerId of offerIds) {
             const pending = this.pendingOffers.get(offerId);
             if (pending) this.cancelPendingPeer(pending.peer);
         }
     }
 
-    async receiveOffer(
+    private async receiveOffer(
         peerId: PeerId,
         offerId: OfferId,
         offer: TrackerSignal,
@@ -442,7 +445,7 @@ export class WebtorrentProvider extends Observable<string> {
         }
     }
 
-    async receiveAnswer(
+    private async receiveAnswer(
         peerId: PeerId,
         offerId: OfferId,
         answer: TrackerSignal,
@@ -503,7 +506,7 @@ export class WebtorrentProvider extends Observable<string> {
         }
     }
 
-    createPeer(
+    private createPeer(
         remotePeerId: PeerId | null,
         initiator: boolean,
         generation: number = this.connectionGeneration,
@@ -534,7 +537,7 @@ export class WebtorrentProvider extends Observable<string> {
         return peer;
     }
 
-    onPeerOpen(
+    private onPeerOpen(
         peer: WebrtcDataPeer,
         initiator: boolean,
         generation: number = this.connectionGeneration,
@@ -564,7 +567,7 @@ export class WebtorrentProvider extends Observable<string> {
         this.emit("peers", [Array.from(this.peers.keys())]);
     }
 
-    onPeerMessage(
+    private onPeerMessage(
         peer: WebrtcDataPeer,
         data: ArrayBuffer,
         generation: number = this.connectionGeneration,
@@ -574,8 +577,13 @@ export class WebtorrentProvider extends Observable<string> {
         if (!peerId || this.peers.get(peerId) !== peer || !peer.connected) return;
         try {
             if (
-                readMessage(this, peer, peerId, data, (message) =>
-                    this.sendProtocolMessage(peer, message),
+                readMessage(
+                    this,
+                    peer,
+                    peerId,
+                    data,
+                    (message) => this.sendProtocolMessage(peer, message),
+                    () => this.sendAwareness(peer),
                 )
             ) {
                 this.syncedPeers.add(peer);
@@ -587,7 +595,7 @@ export class WebtorrentProvider extends Observable<string> {
         }
     }
 
-    removePeer(peer: WebrtcDataPeer, generation: number = this.connectionGeneration): void {
+    private removePeer(peer: WebrtcDataPeer, generation: number = this.connectionGeneration): void {
         if (generation !== this.connectionGeneration) return;
         this.syncedPeers.delete(peer);
         this.updateSyncedState();
@@ -598,7 +606,10 @@ export class WebtorrentProvider extends Observable<string> {
             this.peers.delete(peerId);
             changed = true;
         }
-        if (changed) this.emit("peers", [Array.from(this.peers.keys())]);
+        if (changed) {
+            this.emit("peers", [Array.from(this.peers.keys())]);
+            this.requestRecoveryAnnounce();
+        }
     }
 
     private sendProtocolMessage(peer: WebrtcDataPeer, message: Uint8Array<ArrayBuffer>): boolean {
@@ -611,14 +622,14 @@ export class WebtorrentProvider extends Observable<string> {
         return false;
     }
 
-    sendSyncStep1(peer: WebrtcDataPeer): boolean {
+    private sendSyncStep1(peer: WebrtcDataPeer): boolean {
         const encoder = encoding.createEncoder();
         encoding.writeVarUint(encoder, messageSync);
         syncProtocol.writeSyncStep1(encoder, this.doc);
         return this.sendProtocolMessage(peer, encoding.toUint8Array(encoder));
     }
 
-    sendAwareness(peer: WebrtcDataPeer): boolean {
+    private sendAwareness(peer: WebrtcDataPeer): boolean {
         const states = Array.from(this.awareness.getStates().keys());
         if (states.length === 0) return true;
         const encoder = encoding.createEncoder();
@@ -630,14 +641,14 @@ export class WebtorrentProvider extends Observable<string> {
         return this.sendProtocolMessage(peer, encoding.toUint8Array(encoder));
     }
 
-    broadcastSyncUpdate(update: Uint8Array): void {
+    private broadcastSyncUpdate(update: Uint8Array): void {
         const encoder = encoding.createEncoder();
         encoding.writeVarUint(encoder, messageSync);
         syncProtocol.writeUpdate(encoder, update);
         this.broadcast(encoding.toUint8Array(encoder));
     }
 
-    broadcastAwareness(update: Uint8Array): void {
+    private broadcastAwareness(update: Uint8Array): void {
         const encoder = encoding.createEncoder();
         encoding.writeVarUint(encoder, messageAwareness);
         encoding.writeVarUint8Array(encoder, update);
@@ -654,13 +665,13 @@ export class WebtorrentProvider extends Observable<string> {
         return peer.send(encoding.toUint8Array(encoder));
     }
 
-    broadcast(message: Uint8Array<ArrayBuffer>): void {
+    private broadcast(message: Uint8Array<ArrayBuffer>): void {
         for (const peer of this.peers.values()) {
             if (peer.connected) this.sendProtocolMessage(peer, message);
         }
     }
 
-    emitDebug(event: DebugEvent): void {
+    private emitDebug(event: DebugEvent): void {
         if (this.debug) this.emit("debug", [event]);
     }
 
@@ -707,6 +718,17 @@ export class WebtorrentProvider extends Observable<string> {
         return !this.destroyed && this.shouldConnect && generation === this.connectionGeneration;
     }
 
+    private requestRecoveryAnnounce(): void {
+        if (
+            this.destroyed ||
+            !this.shouldConnect ||
+            this.peers.size + this.pendingPeers.size >= this.maxConns
+        ) {
+            return;
+        }
+        for (const tracker of this.trackerConnections) tracker.requestRecoveryAnnounce();
+    }
+
     private cancelPendingPeer(peer: WebrtcDataPeer): void {
         this.clearPendingPeer(peer);
         peer.destroy();
@@ -733,6 +755,7 @@ export class WebtorrentProvider extends Observable<string> {
             setTimeout(() => {
                 this.pendingTimers.delete(peer);
                 this.cancelPendingPeer(peer);
+                this.requestRecoveryAnnounce();
             }, this.signalTimeout),
         );
     }

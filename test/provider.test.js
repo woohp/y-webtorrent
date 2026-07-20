@@ -598,6 +598,25 @@ test("ICE fallback offer beats the separate collection deadline", async (context
     assert.deepEqual(offers[0].offer, { type: "offer", sdp: "partial-offer" });
     provider.destroy();
 });
+
+test("removing an established peer requests a recovery announce", async () => {
+    const provider = createProvider("peer-loss-recovery", { maxConns: 1 });
+    await provider.ready;
+    let recoveryAnnounces = 0;
+    provider.trackerConnections.push({
+        requestRecoveryAnnounce: () => recoveryAnnounces++,
+        destroy: () => {},
+    });
+    const peer = { connected: true, send: () => true, destroy: () => {} };
+    provider.peerIds.set(peer, "remote");
+    provider.peers.set("remote", peer);
+
+    provider.removePeer(peer);
+
+    assert.equal(recoveryAnnounces, 1);
+    provider.destroy();
+});
+
 test("late Sync Step 2 from a removed peer cannot restore synced", async () => {
     const provider = createProvider("stale-sync");
     await provider.ready;
@@ -702,6 +721,12 @@ test("signal timeout frees capacity while accepting an answer is stuck", async (
     await provider.ready;
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const peers = installSignalingPeers(provider);
+    let recoveryAnnounces = 0;
+    provider.trackerConnections.push({
+        forgetOffer: () => {},
+        requestRecoveryAnnounce: () => recoveryAnnounces++,
+        destroy: () => {},
+    });
     const errors = [];
     provider.on("peer-error", (error) => errors.push(error));
     const [offer] = await provider.createOffers();
@@ -718,6 +743,7 @@ test("signal timeout frees capacity while accepting an answer is stuck", async (
     assert.equal(provider.pendingPeerIds.size, 0);
     assert.equal(provider.pendingOffers.size, 0);
     assert.deepEqual(errors, []);
+    assert.equal(recoveryAnnounces, 1);
 
     const replacementOffers = await provider.createOffers();
     assert.equal(replacementOffers.length, 1);

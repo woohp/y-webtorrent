@@ -1,5 +1,7 @@
 const minimumAnnounceIntervalSeconds = 30;
 const fallbackAnnounceIntervalSeconds = 120;
+const minimumRecoveryAnnounceDelay = 5000;
+const recoveryAnnounceJitter = 1000;
 const maximumTimerDelay = 2_147_483_647;
 
 export const defaultTrackerUrls = [
@@ -76,6 +78,14 @@ export class TrackerConnection {
     reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     connectTimer: ReturnType<typeof setTimeout> | undefined;
     announceResponseTimer: ReturnType<typeof setTimeout> | undefined;
+    private recoveryAnnounceTimer: ReturnType<typeof setTimeout> | undefined;
+    private recoveryAnnounceSocket: WebSocket | null = null;
+    private lastAnnounceAt = 0;
+    private announceInFlight: {
+        socket: WebSocket;
+        promise: Promise<boolean>;
+        trailing: boolean;
+    } | null = null;
     private announceResponseSocket: WebSocket | null = null;
     private readonly announcedOffers = new Map<WebSocket, Set<OfferId>>();
 
@@ -105,6 +115,19 @@ export class TrackerConnection {
 
     connect(): void {
         if (this.destroyed || !this.WebSocket) return;
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
+        if (this.socket) {
+            if (this.socket.readyState === 0 || this.socket.readyState === this.WebSocket.OPEN)
+                return;
+            const staleSocket = this.socket;
+            this.socket = null;
+            try {
+                staleSocket.close();
+            } catch {
+                this.cancelSocketOffers(staleSocket);
+            }
+        }
         clearTimeout(this.connectTimer);
         this.connectTimer = undefined;
 
@@ -156,6 +179,7 @@ export class TrackerConnection {
         socket.addEventListener("close", () => {
             this.cancelSocketOffers(socket);
             this.clearAnnounceResponseTimeout(socket);
+            this.clearRecoveryAnnounceTimer(socket);
             if (socket !== this.socket || this.destroyed) return;
             clearTimeout(this.connectTimer);
             this.connectTimer = undefined;
@@ -163,11 +187,37 @@ export class TrackerConnection {
         });
     }
 
-    async announce(
+    private announce(
         event?: "started" | "stopped" | "completed",
         socket: WebSocket | null = this.socket,
     ): Promise<boolean> {
-        if (!socket || socket !== this.socket || !this.isOpen()) return false;
+        if (!socket || socket !== this.socket || !this.isOpen()) return Promise.resolve(false);
+        const active = this.announceInFlight;
+        if (active?.socket === socket) {
+            if (event !== "stopped") active.trailing = true;
+            return active.promise;
+        }
+
+        const promise = this.performAnnounce(event, socket);
+        const state = { socket, promise, trailing: false };
+        this.announceInFlight = state;
+        const finish = (): void => {
+            if (this.announceInFlight !== state) return;
+            this.announceInFlight = null;
+            if (state.trailing && socket === this.socket && !this.destroyed) {
+                this.requestRecoveryAnnounce();
+            }
+        };
+        void promise.then(finish, finish);
+        return promise;
+    }
+
+    private async performAnnounce(
+        event: "started" | "stopped" | "completed" | undefined,
+        socket: WebSocket,
+    ): Promise<boolean> {
+        if (socket !== this.socket || !this.isOpen()) return false;
+        this.clearRecoveryAnnounceTimer(socket);
 
         const message: TrackerAnnounceMessage = {
             action: "announce",
@@ -188,6 +238,7 @@ export class TrackerConnection {
         try {
             const sent = this.send(message);
             if (sent) {
+                this.lastAnnounceAt = Date.now();
                 this.trackOfferBatch(socket, offers);
                 if (event !== "stopped") this.startAnnounceResponseTimeout(socket);
             } else {
@@ -341,9 +392,32 @@ export class TrackerConnection {
         }, delay);
     }
 
+    requestRecoveryAnnounce(): void {
+        if (this.destroyed || !this.isOpen() || this.recoveryAnnounceTimer) return;
+        const socket = this.socket;
+        const delay =
+            Math.max(0, this.lastAnnounceAt + minimumRecoveryAnnounceDelay - Date.now()) +
+            Math.random() * recoveryAnnounceJitter;
+        this.recoveryAnnounceSocket = socket;
+        this.recoveryAnnounceTimer = setTimeout(() => {
+            this.recoveryAnnounceTimer = undefined;
+            this.recoveryAnnounceSocket = null;
+            if (!this.destroyed && socket === this.socket && this.isOpen()) {
+                void this.announce().catch((error: unknown) => this.onError(error));
+            }
+        }, delay);
+    }
+
     private clearAnnounceTimer(): void {
         clearTimeout(this.announceTimer);
         this.announceTimer = undefined;
+    }
+
+    private clearRecoveryAnnounceTimer(socket?: WebSocket): void {
+        if (socket && socket !== this.recoveryAnnounceSocket) return;
+        clearTimeout(this.recoveryAnnounceTimer);
+        this.recoveryAnnounceTimer = undefined;
+        this.recoveryAnnounceSocket = null;
     }
 
     scheduleReconnect(): void {
@@ -374,6 +448,7 @@ export class TrackerConnection {
         if (this.destroyed) return;
         this.destroyed = true;
         this.clearAnnounceTimer();
+        this.clearRecoveryAnnounceTimer();
         clearTimeout(this.reconnectTimer);
         clearTimeout(this.connectTimer);
         this.connectTimer = undefined;

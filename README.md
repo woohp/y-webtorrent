@@ -45,9 +45,12 @@ provider.on("direct-message", (peerId, data) => {
 - `maxBufferedAmount`: data-channel buffering ceiling, default `4` MiB.
 - `rtcConfig`: optional `RTCPeerConnection` configuration. By default, connections use Google and Cloudflare public STUN servers for NAT traversal. Pass `{ iceServers: [] }` to disable them or provide your own STUN/TURN servers.
 - `channelName`: WebRTC data channel name, default `y-webtorrent`.
+- `peerId`: advanced identity injection for tests; must be a raw 20-character binary string. Normal callers should omit it.
 - `debug`: emit verbose `debug` events, default `false`.
 - `WebSocket`: injectable WebSocket constructor, mostly for tests/non-browser runtimes.
 - `RTCPeerConnection`: injectable WebRTC constructor for tests/non-browser runtimes.
+
+Signaling timeouts and unexpected peer loss request a debounced recovery announce, limited to at most one attempt per tracker every five seconds plus up to one second of jitter.
 
 Counts must be finite, non-negative integers. Timeouts must be between `0` and `2147483647` milliseconds. Send limits must be non-negative numbers and may be `Infinity`. Tracker-requested announce intervals use a 30-second minimum and up to 10% positive jitter; valid responses without a schedulable interval use a conservative 120-second fallback.
 

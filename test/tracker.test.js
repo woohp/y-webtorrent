@@ -91,6 +91,98 @@ test("validates tracker URLs and retries synchronous construction failures", (co
     tracker.destroy();
 });
 
+test("connect does not replace active sockets or leave reconnect timers", (context) => {
+    MockWebSocket.sockets.length = 0;
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const tracker = createTracker();
+    const first = MockWebSocket.sockets[0];
+
+    tracker.connect();
+    assert.equal(MockWebSocket.sockets.length, 1);
+    first.open();
+    tracker.connect();
+    assert.equal(MockWebSocket.sockets.length, 1);
+
+    first.close();
+    assert.ok(tracker.reconnectTimer);
+    tracker.connect();
+    assert.equal(tracker.reconnectTimer, undefined);
+    assert.equal(MockWebSocket.sockets.length, 2);
+    context.mock.timers.tick(1000);
+    assert.equal(MockWebSocket.sockets.length, 2);
+    tracker.destroy();
+});
+
+test("overlapping announce requests coalesce behind in-flight offer creation", async (context) => {
+    MockWebSocket.sockets.length = 0;
+    context.mock.method(Math, "random", () => 0);
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    let resolveFirstOffers;
+    let createCount = 0;
+    const tracker = createTracker({
+        createOffers: () => {
+            createCount++;
+            if (createCount === 1) {
+                return new Promise((resolve) => (resolveFirstOffers = resolve));
+            }
+            return [];
+        },
+    });
+    const socket = MockWebSocket.sockets[0];
+    socket.open();
+    await Promise.resolve();
+    assert.equal(createCount, 1);
+
+    tracker.scheduleAnnounce(1);
+    context.mock.timers.tick(30_000);
+    tracker.requestRecoveryAnnounce();
+    context.mock.timers.tick(0);
+    tracker.requestRecoveryAnnounce();
+    context.mock.timers.tick(0);
+    assert.equal(createCount, 1);
+    assert.equal(socket.sent.length, 0);
+
+    resolveFirstOffers([]);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(socket.sent.length, 1);
+    assert.equal(createCount, 1);
+
+    context.mock.timers.tick(4_999);
+    assert.equal(createCount, 1);
+    context.mock.timers.tick(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(createCount, 2);
+    assert.equal(socket.sent.length, 2);
+    tracker.destroy();
+});
+
+test("recovery announces are debounced and rate limited", async (context) => {
+    MockWebSocket.sockets.length = 0;
+    context.mock.method(Math, "random", () => 0);
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const tracker = createTracker();
+    const socket = MockWebSocket.sockets[0];
+    socket.open();
+    await Promise.resolve();
+    socket.dispatch("message", {
+        data: JSON.stringify({ action: "announce", info_hash: "info-hash", interval: 120 }),
+    });
+    await Promise.resolve();
+    socket.sent.length = 0;
+
+    tracker.requestRecoveryAnnounce();
+    tracker.requestRecoveryAnnounce();
+    context.mock.timers.tick(4_999);
+    assert.equal(socket.sent.length, 0);
+    context.mock.timers.tick(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(socket.sent.length, 1);
+    tracker.destroy();
+});
+
 test("times out sockets that never open", (context) => {
     MockWebSocket.sockets.length = 0;
     context.mock.timers.enable({ apis: ["setTimeout"] });
@@ -490,8 +582,8 @@ test("a stale response timeout cannot close a replacement socket", async (contex
     stale.open();
     await Promise.resolve();
 
-    tracker.connect();
-    const replacement = MockWebSocket.sockets.at(-1);
+    const replacement = new MockWebSocket("wss://replacement.test");
+    tracker.socket = replacement;
     context.mock.timers.tick(100);
 
     assert.equal(replacement.readyState, 0);

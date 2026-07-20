@@ -15,6 +15,7 @@ let doc = null;
 let provider = null;
 let ytext = null;
 let applyingRemote = false;
+let connectedCount = 0;
 const logs = [];
 
 const log = (...args) => {
@@ -37,7 +38,7 @@ const renderStatus = () => {
     statusEl.textContent = [
         `room: ${roomInput.value}`,
         `trackers: ${trackersInput.value}`,
-        `connected: ${provider ? provider.peers.size : 0}`,
+        `connected: ${connectedCount}`,
         `peer id: ${provider ? JSON.stringify(provider.peerId) : "-"}`,
         "",
         ...logs,
@@ -58,7 +59,10 @@ const connect = () => {
     });
 
     provider.on("status", (event) => log("tracker status", event));
-    provider.on("peers", (peers) => log("peers", peers));
+    provider.on("peers", (peers) => {
+        connectedCount = peers.length;
+        log("peers", peers);
+    });
     provider.on("synced", (synced) => log("synced", synced));
     provider.on("connection-error", (event) => log("connection-error", event));
     provider.on("peer-error", (event) => log("peer-error", event));
@@ -84,6 +88,7 @@ const disconnect = () => {
     provider = null;
     doc = null;
     ytext = null;
+    connectedCount = 0;
     textArea.disabled = true;
     connectButton.disabled = false;
     disconnectButton.disabled = true;
