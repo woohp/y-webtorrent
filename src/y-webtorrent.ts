@@ -113,6 +113,7 @@ const readMessage = (
     data: ArrayBuffer,
     sendProtocolMessage: (message: Uint8Array<ArrayBuffer>) => boolean,
     sendAwareness: () => boolean,
+    emitDirectMessage: (data: Uint8Array) => void,
 ): boolean => {
     const decoder = decoding.createDecoder(new Uint8Array(data));
     const encoder = encoding.createEncoder();
@@ -134,7 +135,7 @@ const readMessage = (
     } else if (messageType === messageQueryAwareness) {
         sendAwareness();
     } else if (messageType === messageDirect && peerId) {
-        provider.emit("direct-message", [peerId, decoding.readVarUint8Array(decoder)]);
+        emitDirectMessage(decoding.readVarUint8Array(decoder));
     }
     return false;
 };
@@ -275,7 +276,7 @@ export class WebtorrentProvider extends Observable<string> {
                         void this.receiveOffer(peerId, offerId, offer, tracker, generation).catch(
                             (error: unknown) => {
                                 if (this.isCurrentGeneration(generation)) {
-                                    this.emit("connection-error", [error]);
+                                    this.emitSafely("connection-error", [error]);
                                 }
                             },
                         );
@@ -284,22 +285,23 @@ export class WebtorrentProvider extends Observable<string> {
                         void this.receiveAnswer(peerId, offerId, answer, generation).catch(
                             (error: unknown) => {
                                 if (this.isCurrentGeneration(generation)) {
-                                    this.emit("connection-error", [error]);
+                                    this.emitSafely("connection-error", [error]);
                                 }
                             },
                         );
                     },
                     onAnnounce: (message: Parameters<TrackerConnection["onAnnounce"]>[0]) => {
-                        if (this.isCurrentGeneration(generation)) this.emit("announce", [message]);
+                        if (this.isCurrentGeneration(generation))
+                            this.emitSafely("announce", [message]);
                     },
                     onState: (status: Parameters<TrackerConnection["onState"]>[0]) => {
                         if (generation === this.connectionGeneration) {
-                            this.emit("status", [{ status, tracker: url }]);
+                            this.emitSafely("status", [{ status, tracker: url }]);
                         }
                     },
                     onError: (error: unknown) => {
                         if (this.isCurrentGeneration(generation)) {
-                            this.emit("connection-error", [error]);
+                            this.emitSafely("connection-error", [error]);
                         }
                     },
                     connectTimeout: this.trackerConnectTimeout,
@@ -308,7 +310,7 @@ export class WebtorrentProvider extends Observable<string> {
                 };
                 this.trackerConnections.push(new TrackerConnection(url, trackerOptions));
             } catch (error) {
-                this.emit("connection-error", [error]);
+                this.emitSafely("connection-error", [error]);
             }
         }
     }
@@ -329,7 +331,7 @@ export class WebtorrentProvider extends Observable<string> {
             try {
                 peer = this.createPeer(null, true, generation);
             } catch (error) {
-                this.emit("peer-error", [error]);
+                this.emitSafely("peer-error", [error]);
                 negotiationFailed = true;
                 continue;
             }
@@ -358,7 +360,7 @@ export class WebtorrentProvider extends Observable<string> {
             (error) => {
                 if (this.isCurrentGeneration(generation)) {
                     negotiationFailed = true;
-                    this.emit("peer-error", [error]);
+                    this.emitSafely("peer-error", [error]);
                 }
             },
         );
@@ -427,7 +429,7 @@ export class WebtorrentProvider extends Observable<string> {
         try {
             peer = this.createPeer(peerId, false, generation);
         } catch (error) {
-            this.emit("peer-error", [error]);
+            this.emitSafely("peer-error", [error]);
             this.requestRecoveryAnnounce();
             return;
         }
@@ -444,7 +446,7 @@ export class WebtorrentProvider extends Observable<string> {
             const trackerWasOpen = tracker.isOpen();
             if (!tracker.sendAnswer(peerId, offerId, answer)) {
                 if (!trackerWasOpen) {
-                    this.emit("connection-error", [
+                    this.emitSafely("connection-error", [
                         new Error("No open tracker accepted the answer"),
                     ]);
                 }
@@ -456,7 +458,7 @@ export class WebtorrentProvider extends Observable<string> {
             if (!this.isCurrentGeneration(generation) || this.pendingPeerIds.get(peerId) !== peer) {
                 return;
             }
-            this.emit("peer-error", [error]);
+            this.emitSafely("peer-error", [error]);
             this.cancelPendingPeer(peer);
             this.requestRecoveryAnnounce();
         }
@@ -518,7 +520,7 @@ export class WebtorrentProvider extends Observable<string> {
             ) {
                 return;
             }
-            this.emit("peer-error", [error]);
+            this.emitSafely("peer-error", [error]);
             this.cancelPendingPeer(pending.peer);
             this.requestRecoveryAnnounce();
         }
@@ -541,7 +543,7 @@ export class WebtorrentProvider extends Observable<string> {
             onMessage: (peer, data) => this.onPeerMessage(peer, data, generation),
             onClose: (peer) => this.removePeer(peer, generation),
             onError: (_peer, error) => {
-                if (this.isCurrentGeneration(generation)) this.emit("peer-error", [error]);
+                if (this.isCurrentGeneration(generation)) this.emitSafely("peer-error", [error]);
             },
             onDebug: (event) => this.emitDebug({ ...event, type: String(event["type"]) }),
         });
@@ -582,7 +584,7 @@ export class WebtorrentProvider extends Observable<string> {
         this.peers.set(peerId, peer);
         this.emitDebug({ type: "peer-connect", peerId, initiator });
         if (!this.sendSyncStep1(peer) || !this.sendAwareness(peer)) return;
-        this.emit("peers", [Array.from(this.peers.keys())]);
+        this.emitSafely("peers", [Array.from(this.peers.keys())]);
     }
 
     private onPeerMessage(
@@ -602,13 +604,14 @@ export class WebtorrentProvider extends Observable<string> {
                     data,
                     (message) => this.sendProtocolMessage(peer, message),
                     () => this.sendAwareness(peer),
+                    (message) => this.emitSafely("direct-message", [peerId, message]),
                 )
             ) {
                 this.syncedPeers.add(peer);
                 this.updateSyncedState();
             }
         } catch (error) {
-            this.emit("peer-error", [error]);
+            this.emitSafely("peer-error", [error]);
             peer.destroy();
         }
     }
@@ -625,8 +628,8 @@ export class WebtorrentProvider extends Observable<string> {
             changed = true;
         }
         if (changed) {
-            this.emit("peers", [Array.from(this.peers.keys())]);
             this.requestRecoveryAnnounce();
+            this.emitSafely("peers", [Array.from(this.peers.keys())]);
         }
     }
 
@@ -634,7 +637,7 @@ export class WebtorrentProvider extends Observable<string> {
         try {
             if (peer.send(message)) return true;
         } catch (error) {
-            this.emit("peer-error", [error]);
+            this.emitSafely("peer-error", [error]);
         }
         peer.destroy();
         return false;
@@ -689,8 +692,22 @@ export class WebtorrentProvider extends Observable<string> {
         }
     }
 
+    private emitSafely(eventName: string, args: unknown[]): void {
+        const observers = this._observers.get(eventName) as
+            | Set<(...observerArgs: unknown[]) => void>
+            | undefined;
+        if (!observers) return;
+        for (const observer of Array.from(observers)) {
+            try {
+                observer(...args);
+            } catch {
+                // Observers must not interrupt each other or provider lifecycle work.
+            }
+        }
+    }
+
     private emitDebug(event: DebugEvent): void {
-        if (this.debug) this.emit("debug", [event]);
+        if (this.debug) this.emitSafely("debug", [event]);
     }
 
     disconnect(): void {
@@ -715,15 +732,11 @@ export class WebtorrentProvider extends Observable<string> {
         this.syncedPeers.clear();
         if (this.synced) {
             this.synced = false;
-            this.emit("synced", [false]);
+            this.emitSafely("synced", [false]);
         }
         if (localAwarenessState !== null) this.awareness.setLocalState(localAwarenessState);
         for (const tracker of disconnectedTrackers) {
-            try {
-                this.emit("status", [{ status: "disconnected", tracker: tracker.url }]);
-            } catch {
-                // Status observers must not interrupt provider teardown.
-            }
+            this.emitSafely("status", [{ status: "disconnected", tracker: tracker.url }]);
         }
     }
 
@@ -795,7 +808,7 @@ export class WebtorrentProvider extends Observable<string> {
         const synced = this.syncedPeers.size > 0;
         if (synced === this.synced) return;
         this.synced = synced;
-        this.emit("synced", [synced]);
+        this.emitSafely("synced", [synced]);
     }
 }
 

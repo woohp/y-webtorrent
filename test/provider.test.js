@@ -191,6 +191,9 @@ test("protocol send failure and malformed frames destroy the affected peer", asy
     };
     provider.peerIds.set(malformedPeer, "malformed");
     provider.peers.set("malformed", malformedPeer);
+    provider.on("peer-error", () => {
+        throw new Error("peer-error listener failed");
+    });
     provider.onPeerMessage(malformedPeer, new Uint8Array([255]).buffer);
     assert.equal(malformedDestroyed, 1);
     provider.destroy();
@@ -711,7 +714,7 @@ test("genuine negotiation failures request recovery announces", async () => {
     assert.equal(answering.recoveries(), 1);
     answering.provider.destroy();
 });
-test("removing an established peer requests a recovery announce", async () => {
+test("throwing peers listeners cannot prevent peer-loss recovery", async () => {
     const provider = createProvider("peer-loss-recovery", { maxConns: 1 });
     await provider.ready;
     let recoveryAnnounces = 0;
@@ -722,10 +725,15 @@ test("removing an established peer requests a recovery announce", async () => {
     const peer = { connected: true, send: () => true, destroy: () => {} };
     provider.peerIds.set(peer, "remote");
     provider.peers.set("remote", peer);
+    let laterListenerCalls = 0;
+    provider.on("peers", () => {
+        throw new Error("peers listener failed");
+    });
+    provider.on("peers", () => laterListenerCalls++);
 
-    provider.removePeer(peer);
-
+    assert.doesNotThrow(() => provider.removePeer(peer));
     assert.equal(recoveryAnnounces, 1);
+    assert.equal(laterListenerCalls, 1);
     provider.destroy();
 });
 

@@ -50,6 +50,8 @@ provider.on("direct-message", (peerId, data) => {
 - `WebSocket`: injectable WebSocket constructor, mostly for tests/non-browser runtimes.
 - `RTCPeerConnection`: injectable WebRTC constructor for tests/non-browser runtimes.
 
+`provider.ready` resolves after room hashing and all configured tracker construction attempts have completed. It does not mean a tracker socket is open, a WebRTC peer is connected, or Yjs synchronization has completed; use `status`, `peers`, and `synced` for those states.
+
 Tracker lifecycle is emitted through `status` events (`connected`, `reconnecting`, or `disconnected`). Valid swarm statistics are emitted separately through `announce` events.
 
 Signaling timeouts and unexpected peer loss request a debounced recovery announce, limited to at most one attempt per tracker every five seconds plus up to one second of jitter.
