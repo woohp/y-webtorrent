@@ -58,6 +58,7 @@ export interface TrackerConnectionOptions {
     WebSocket?: typeof WebSocket;
 }
 
+/** @internal Tracker signaling implementation; not exported from the package entry point. */
 export class TrackerConnection {
     readonly url: string;
     readonly infoHash: InfoHash;

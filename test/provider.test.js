@@ -367,6 +367,22 @@ test("peer opening during answer acceptance is preserved", async () => {
     provider.destroy();
 });
 
+test("tracker announces share global pending-offer capacity", async () => {
+    const provider = createProvider("tracker-capacity", { maxConns: 1, numwant: 1 });
+    await provider.ready;
+    installSignalingPeers(provider);
+
+    const firstAnnounceOffers = await provider.createOffers();
+    const secondAnnounceOffers = await provider.createOffers();
+    assert.equal(firstAnnounceOffers.length, 1);
+    assert.equal(secondAnnounceOffers.length, 0);
+
+    provider.cancelOffers([firstAnnounceOffers[0].offer_id]);
+    const secondAnnounceRetry = await provider.createOffers();
+    assert.equal(secondAnnounceRetry.length, 1);
+    provider.destroy();
+});
+
 test("canceling an unpublished offer batch restores capacity", async () => {
     const provider = createProvider("cancel-offer-batch", { maxConns: 1, numwant: 1 });
     await provider.ready;

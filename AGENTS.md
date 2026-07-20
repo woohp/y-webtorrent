@@ -37,6 +37,8 @@ Browser-oriented Yjs provider that uses WebTorrent-compatible WebSocket trackers
 - Trackers are used only for discovery and WebRTC offer/answer signaling; Yjs updates go peer-to-peer over WebRTC.
 - `info_hash` and `peer_id` must be raw 20-character binary strings, not hex.
 - The provider uses browser-native `RTCPeerConnection`/`RTCDataChannel` via `webrtc-data-peer`; avoid Node WebRTC shims unless explicitly adding Node support.
+- Do not remove remote awareness immediately when a transport closes: forwarded awareness frames have no authoritative owner metadata, so cleanup remains timeout-based.
+- Room passwords and backward compatibility with the removed `password` option are intentionally unsupported; room names are identifiers, not authentication or access control.
 - The provider currently uses non-trickle ICE, so initial connection can take a few seconds while complete offers/answers are gathered.
 - Public debug internals are gated by `debug: true`; keep default usage quiet.
 - `synced` requires Yjs Sync Step 2 from a currently connected peer. Protocol-send failure destroys that peer so a later tracker exchange can repair synchronization.

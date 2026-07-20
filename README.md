@@ -35,7 +35,7 @@ provider.on("direct-message", (peerId, data) => {
 - `trackers`: WebSocket tracker URLs.
 - `awareness`: optional `y-protocols/awareness` instance.
 - `maxConns`: maximum WebRTC peers, default `20`.
-- `numwant`: offers to create per tracker announce, default `3` capped by `maxConns` (therefore `0` when `maxConns` is `0`).
+- `numwant`: requested offers per tracker announce, default `3` capped by `maxConns` (therefore `0` when `maxConns` is `0`). Outstanding offers across all trackers share the provider-wide `maxConns` capacity, so an announce may create fewer offers—or none—while another tracker owns pending offers.
 - `offerTimeout`: max milliseconds to wait for ICE gathering before using the current local description, default `5000`.
 - `offerCollectionTimeout`: outer deadline for all native offer-creation work, default `offerTimeout + 5000`.
 - `signalTimeout`: max milliseconds for a signaled peer to open, default `15000`.
@@ -82,5 +82,7 @@ The provider uses browser-native `RTCPeerConnection`/`RTCDataChannel`; no Node W
 This package is browser-oriented. Node support requires supplying compatible WebSocket/WebRTC implementations through options.
 
 Initial connections may take a few seconds because the provider uses non-trickle ICE so tracker messages contain complete offers/answers. `provider.synced` becomes true only after Yjs Sync Step 2 completes with at least one currently connected peer.
+
+Remote awareness states expire according to the Awareness timeout after an abrupt peer loss. They are not removed immediately because forwarded awareness frames do not identify an authoritative owning peer; removing every client ID observed through a closing peer could erase users still reachable through another peer.
 
 WebRTC messages use single data-channel frames. Fragmentation, large-document synchronization beyond the negotiated or fallback frame limit, sustained burst traffic, and outbound queueing are intentionally unsupported.
