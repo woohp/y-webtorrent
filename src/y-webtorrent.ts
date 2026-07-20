@@ -4,13 +4,14 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import type { Awareness } from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
-import { Observable } from "lib0/observable";
+import { ObservableV2 } from "lib0/observable";
 import { createInfoHash, createPeerId } from "./crypto.js";
 import {
     TrackerConnection,
     defaultTrackerUrls,
     type OfferId,
     type PeerId,
+    type TrackerAnnounceMessage,
     type TrackerOffer,
     type TrackerSignal,
 } from "./tracker.js";
@@ -106,6 +107,28 @@ export interface DebugEvent {
     [key: string]: unknown;
 }
 
+export interface TrackerStatusEvent {
+    status: "connected" | "reconnecting" | "disconnected";
+    tracker: string;
+}
+
+export interface ListenerErrorEvent {
+    eventName: keyof WebtorrentProviderEvents;
+    error: unknown;
+}
+
+export interface WebtorrentProviderEvents {
+    announce: (message: TrackerAnnounceMessage) => void;
+    "connection-error": (error: unknown) => void;
+    debug: (event: DebugEvent) => void;
+    "direct-message": (peerId: PeerId, data: Uint8Array) => void;
+    "listener-error": (event: ListenerErrorEvent) => void;
+    peers: (peerIds: PeerId[]) => void;
+    "peer-error": (error: unknown) => void;
+    status: (event: TrackerStatusEvent) => void;
+    synced: (synced: boolean) => void;
+}
+
 const readMessage = (
     provider: WebtorrentProvider,
     peer: WebrtcDataPeer,
@@ -140,7 +163,7 @@ const readMessage = (
     return false;
 };
 
-export class WebtorrentProvider extends Observable<string> {
+export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     readonly roomName: string;
     readonly doc: Y.Doc;
     readonly trackers: readonly string[];
@@ -692,9 +715,12 @@ export class WebtorrentProvider extends Observable<string> {
         }
     }
 
-    private emitSafely(eventName: string, args: unknown[]): void {
+    private emitSafely<Name extends keyof WebtorrentProviderEvents & string>(
+        eventName: Name,
+        args: Parameters<WebtorrentProviderEvents[Name]>,
+    ): void {
         const observers = this._observers.get(eventName) as
-            | Set<(...observerArgs: unknown[]) => void>
+            | Set<(...observerArgs: Parameters<WebtorrentProviderEvents[Name]>) => void>
             | undefined;
         if (!observers) return;
         for (const observer of Array.from(observers)) {
