@@ -539,6 +539,32 @@ test("disconnect and destroy leave caller-owned awareness usable", async () => {
     awareness.destroy();
 });
 
+test("uses normalized tracker URLs for every lifecycle status", async () => {
+    class QuietWebSocket {
+        static OPEN = 1;
+        readyState = 0;
+        addEventListener() {}
+        close() {}
+    }
+
+    const provider = createProvider("normalized-tracker-status", {
+        trackers: ["wss://tracker.example"],
+        WebSocket: QuietWebSocket,
+    });
+    const statuses = [];
+    provider.on("status", (event) => statuses.push(event));
+    await provider.ready;
+
+    provider.trackerConnections[0].onState("connected");
+    provider.disconnect();
+
+    assert.deepEqual(statuses, [
+        { status: "connected", tracker: "wss://tracker.example/" },
+        { status: "disconnected", tracker: "wss://tracker.example/" },
+    ]);
+    provider.destroy();
+});
+
 test("throwing status listeners cannot interrupt provider disconnect", async () => {
     const provider = createProvider("throwing-status");
     await provider.ready;

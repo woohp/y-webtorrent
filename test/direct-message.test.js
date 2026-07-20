@@ -188,6 +188,31 @@ test("deeply isolates nested default ICE server values", () => {
     }
 });
 
+test("debug output recognizes an injected WebRTC constructor", () => {
+    const globalRtcPeerConnection = globalThis.RTCPeerConnection;
+    globalThis.RTCPeerConnection = undefined;
+    try {
+        const provider = new WebtorrentProvider("test-room", new Y.Doc(), {
+            peerId: validPeerId("injected-rtc-debug"),
+            trackers: [],
+            RTCPeerConnection: FakePeerConnection,
+            debug: true,
+        });
+        const events = [];
+        provider.on("debug", (event) => events.push(event));
+        const peer = provider.createPeer("remote", true);
+
+        assert.equal(
+            events.find((event) => event.type === "peer-created").hasRtcPeerConnection,
+            true,
+        );
+        peer.destroy();
+        provider.destroy();
+    } finally {
+        globalThis.RTCPeerConnection = globalRtcPeerConnection;
+    }
+});
+
 test("normalizes transport debug event types", () => {
     const provider = new WebtorrentProvider("test-room", new Y.Doc(), {
         peerId: validPeerId("debug-events"),

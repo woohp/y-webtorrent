@@ -284,6 +284,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         for (const url of this.trackers) {
             if (!this.isCurrentGeneration(generation)) break;
             try {
+                const trackerUrl = new URL(url).href;
                 const trackerOptions = {
                     infoHash,
                     peerId: this.peerId,
@@ -319,7 +320,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                     },
                     onState: (status: Parameters<TrackerConnection["onState"]>[0]) => {
                         if (generation === this.connectionGeneration) {
-                            this.emitSafely("status", [{ status, tracker: url }]);
+                            this.emitSafely("status", [{ status, tracker: trackerUrl }]);
                         }
                     },
                     onError: (error: unknown) => {
@@ -331,7 +332,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                     announceResponseTimeout: this.announceResponseTimeout,
                     ...(this._WebSocket ? { WebSocket: this._WebSocket } : {}),
                 };
-                this.trackerConnections.push(new TrackerConnection(url, trackerOptions));
+                this.trackerConnections.push(new TrackerConnection(trackerUrl, trackerOptions));
             } catch (error) {
                 this.emitSafely("connection-error", [error]);
             }
@@ -574,7 +575,9 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         this.emitDebug({
             type: "peer-created",
             initiator,
-            hasRtcPeerConnection: typeof globalThis.RTCPeerConnection !== "undefined",
+            hasRtcPeerConnection:
+                this._RTCPeerConnection !== undefined ||
+                typeof globalThis.RTCPeerConnection !== "undefined",
             hasRtcSessionDescription: typeof globalThis.RTCSessionDescription !== "undefined",
         });
         return peer;
