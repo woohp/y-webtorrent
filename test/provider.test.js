@@ -38,9 +38,11 @@ globalThis.RTCPeerConnection = FakePeerConnection;
 
 const { WebtorrentProvider } = await import("../dist/index.js");
 
+const validPeerId = (peerId) => peerId.padEnd(20, "\0").slice(0, 20);
+
 const createProvider = (peerId, opts = {}) =>
     new WebtorrentProvider("provider-tests", new Y.Doc(), {
-        peerId,
+        peerId: validPeerId(peerId),
         trackers: [],
         ...opts,
     });
@@ -503,7 +505,7 @@ test("disconnect and destroy leave caller-owned awareness usable", async () => {
     const awareness = new Awareness(doc);
     awareness.setLocalState({ user: "external" });
     const provider = new WebtorrentProvider("external-awareness", doc, {
-        peerId: "external-awareness",
+        peerId: validPeerId("external-awareness"),
         trackers: [],
         awareness,
     });
@@ -516,6 +518,26 @@ test("disconnect and destroy leave caller-owned awareness usable", async () => {
     awareness.setLocalState({ user: "still usable" });
     assert.deepEqual(awareness.getLocalState(), { user: "still usable" });
     awareness.destroy();
+});
+
+test("throwing status listeners cannot interrupt provider disconnect", async () => {
+    const provider = createProvider("throwing-status");
+    await provider.ready;
+    let trackerDestroyed = false;
+    provider.trackerConnections.push({
+        url: "wss://tracker.test/",
+        destroy: () => {
+            trackerDestroyed = true;
+        },
+    });
+    provider.on("status", () => {
+        throw new Error("status listener failed");
+    });
+
+    assert.doesNotThrow(() => provider.disconnect());
+    assert.equal(trackerDestroyed, true);
+    assert.equal(provider.trackerConnections.length, 0);
+    provider.destroy();
 });
 
 test("connect is reusable while destroy is final", async () => {
@@ -599,6 +621,80 @@ test("ICE fallback offer beats the separate collection deadline", async (context
     provider.destroy();
 });
 
+test("genuine negotiation failures request recovery announces", async () => {
+    const makeProvider = async (name) => {
+        const provider = createProvider(name, { maxConns: 1, numwant: 1 });
+        await provider.ready;
+        let recoveries = 0;
+        provider.trackerConnections.push({
+            forgetOffer: () => {},
+            requestRecoveryAnnounce: () => recoveries++,
+            destroy: () => {},
+        });
+        return { provider, recoveries: () => recoveries };
+    };
+
+    const outbound = await makeProvider("failed-create-offer");
+    installSignalingPeers(outbound.provider, async () => {
+        throw new Error("createOffer failed");
+    });
+    assert.deepEqual(await outbound.provider.createOffers(), []);
+    assert.equal(outbound.recoveries(), 1);
+    outbound.provider.destroy();
+
+    const constructing = await makeProvider("failed-peer-construction");
+    constructing.provider.createPeer = () => {
+        throw new Error("peer construction failed");
+    };
+    assert.deepEqual(await constructing.provider.createOffers(), []);
+    assert.equal(constructing.recoveries(), 1);
+    constructing.provider.destroy();
+
+    const publishing = await makeProvider("failed-answer-publication");
+    installSignalingPeers(publishing.provider);
+    const failedTracker = createFakeTracker();
+    failedTracker.sendAnswer = () => false;
+    await publishing.provider.receiveOffer(
+        "r".repeat(20),
+        "incoming",
+        { type: "offer", sdp: "offer" },
+        failedTracker,
+    );
+    assert.equal(publishing.recoveries(), 1);
+    publishing.provider.destroy();
+
+    const incoming = await makeProvider("failed-accept-offer");
+    installSignalingPeers(incoming.provider);
+    const incomingCreatePeer = incoming.provider.createPeer.bind(incoming.provider);
+    incoming.provider.createPeer = (...args) => {
+        const peer = incomingCreatePeer(...args);
+        peer.acceptOffer = async () => {
+            throw new Error("acceptOffer failed");
+        };
+        return peer;
+    };
+    await incoming.provider.receiveOffer(
+        "r".repeat(20),
+        "incoming",
+        { type: "offer", sdp: "offer" },
+        createFakeTracker(),
+    );
+    assert.equal(incoming.recoveries(), 1);
+    incoming.provider.destroy();
+
+    const answering = await makeProvider("failed-accept-answer");
+    const peers = installSignalingPeers(answering.provider);
+    const [offer] = await answering.provider.createOffers();
+    peers[0].acceptAnswer = async () => {
+        throw new Error("acceptAnswer failed");
+    };
+    await answering.provider.receiveAnswer("r".repeat(20), offer.offer_id, {
+        type: "answer",
+        sdp: "answer",
+    });
+    assert.equal(answering.recoveries(), 1);
+    answering.provider.destroy();
+});
 test("removing an established peer requests a recovery announce", async () => {
     const provider = createProvider("peer-loss-recovery", { maxConns: 1 });
     await provider.ready;
@@ -644,7 +740,7 @@ test("disconnect prevents late room derivation from creating trackers", async ()
         }
     }
     const provider = new WebtorrentProvider("late-connect", new Y.Doc(), {
-        peerId: "late-connect",
+        peerId: validPeerId("late-connect"),
         trackers: ["wss://tracker.test"],
         WebSocket: CountingWebSocket,
     });

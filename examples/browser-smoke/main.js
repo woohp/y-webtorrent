@@ -59,6 +59,7 @@ const connect = () => {
     });
 
     provider.on("status", (event) => log("tracker status", event));
+    provider.on("announce", (event) => log("tracker announce", event));
     provider.on("peers", (peers) => {
         connectedCount = peers.length;
         log("peers", peers);

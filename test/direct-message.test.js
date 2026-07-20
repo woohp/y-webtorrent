@@ -41,13 +41,41 @@ globalThis.RTCPeerConnection = FakePeerConnection;
 
 const { WebtorrentProvider, defaultRtcConfig } = await import("../dist/index.js");
 
+const validPeerId = (peerId) => peerId.padEnd(20, "\0").slice(0, 20);
+
 function createProvider(peerId, opts = {}) {
     return new WebtorrentProvider("test-room", new Y.Doc(), {
-        peerId,
+        peerId: validPeerId(peerId),
         trackers: [],
         ...opts,
     });
 }
+
+test("validates injected peer IDs", () => {
+    for (const peerId of [
+        "",
+        "short",
+        "x".repeat(21),
+        `x${String.fromCharCode(256)}${"x".repeat(18)}`,
+        42,
+    ]) {
+        assert.throws(
+            () =>
+                new WebtorrentProvider("test-room", new Y.Doc(), {
+                    trackers: [],
+                    peerId,
+                }),
+            /peerId/,
+        );
+    }
+    const peerId = String.fromCharCode(...Array.from({ length: 20 }, (_, index) => index));
+    const provider = new WebtorrentProvider("test-room", new Y.Doc(), {
+        trackers: [],
+        peerId,
+    });
+    assert.equal(provider.peerId, peerId);
+    provider.destroy();
+});
 
 test("validates provider numeric options at construction", () => {
     for (const option of ["maxConns", "numwant"]) {
@@ -85,6 +113,10 @@ test("validates provider numeric options at construction", () => {
         /offerCollectionTimeout/,
     );
 
+    const zeroCapacity = createProvider("zero-capacity", { maxConns: 0 });
+    assert.equal(zeroCapacity.numwant, 0);
+    zeroCapacity.destroy();
+
     const provider = createProvider("numeric-boundaries", {
         maxConns: 0,
         numwant: 0,
@@ -114,7 +146,7 @@ test("uses isolated public STUN defaults and allows rtcConfig overrides", () => 
 
     const rtcConfig = { iceServers: [] };
     const overridden = new WebtorrentProvider("test-room", new Y.Doc(), {
-        peerId: "overridden-rtc",
+        peerId: validPeerId("overridden-rtc"),
         trackers: [],
         rtcConfig,
     });
@@ -158,7 +190,7 @@ test("deeply isolates nested default ICE server values", () => {
 
 test("normalizes transport debug event types", () => {
     const provider = new WebtorrentProvider("test-room", new Y.Doc(), {
-        peerId: "debug-events",
+        peerId: validPeerId("debug-events"),
         trackers: [],
         debug: true,
     });

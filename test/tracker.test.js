@@ -91,6 +91,39 @@ test("validates tracker URLs and retries synchronous construction failures", (co
     tracker.destroy();
 });
 
+test("throwing tracker state observers cannot prevent reconnect or teardown", async () => {
+    MockWebSocket.sockets.length = 0;
+    const tracker = createTracker({
+        onState: () => {
+            throw new Error("status listener failed");
+        },
+    });
+    const socket = MockWebSocket.sockets[0];
+    socket.open();
+    await Promise.resolve();
+    assert.equal(socket.sent.length, 1);
+
+    socket.close();
+    assert.ok(tracker.reconnectTimer);
+    assert.doesNotThrow(() => tracker.destroy());
+    assert.equal(tracker.destroyed, true);
+});
+
+test("reports tracker connection lifecycle states", () => {
+    MockWebSocket.sockets.length = 0;
+    const states = [];
+    const tracker = createTracker({ onState: (state) => states.push(state) });
+    const first = MockWebSocket.sockets[0];
+    first.open();
+    first.close();
+    tracker.connect();
+    const second = MockWebSocket.sockets.at(-1);
+    second.open();
+    tracker.destroy();
+
+    assert.deepEqual(states, ["connected", "reconnecting", "connected", "disconnected"]);
+});
+
 test("connect does not replace active sockets or leave reconnect timers", (context) => {
     MockWebSocket.sockets.length = 0;
     context.mock.timers.enable({ apis: ["setTimeout"] });
@@ -115,6 +148,7 @@ test("connect does not replace active sockets or leave reconnect timers", (conte
 
 test("overlapping announce requests coalesce behind in-flight offer creation", async (context) => {
     MockWebSocket.sockets.length = 0;
+    context.mock.method(Date, "now", () => 0);
     context.mock.method(Math, "random", () => 0);
     context.mock.timers.enable({ apis: ["setTimeout"] });
     let resolveFirstOffers;

@@ -35,6 +35,14 @@ const cloneDefaultRtcConfig = (): RTCConfiguration => {
 
 const maximumTimerDelay = 2_147_483_647;
 
+const validatePeerId = (peerId: string): PeerId => {
+    if (typeof peerId !== "string") throw new TypeError("peerId must be a string");
+    if (peerId.length !== 20 || [...peerId].some((character) => character.charCodeAt(0) > 255)) {
+        throw new RangeError("peerId must be a raw 20-character binary string");
+    }
+    return peerId;
+};
+
 const validateCount = (name: string, value: number): number => {
     if (typeof value !== "number") throw new TypeError(`${name} must be a number`);
     if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
@@ -177,10 +185,7 @@ export class WebtorrentProvider extends Observable<string> {
         this.doc = doc;
         this.trackers = opts.trackers || defaultTrackerUrls;
         this.maxConns = validateCount("maxConns", opts.maxConns ?? 20);
-        this.numwant = validateCount(
-            "numwant",
-            opts.numwant ?? Math.min(3, Math.max(1, this.maxConns)),
-        );
+        this.numwant = validateCount("numwant", opts.numwant ?? Math.min(3, this.maxConns));
         this.offerTimeout = validateTimeout("offerTimeout", opts.offerTimeout ?? 5000);
         this.offerCollectionTimeout = validateTimeout(
             "offerCollectionTimeout",
@@ -205,7 +210,7 @@ export class WebtorrentProvider extends Observable<string> {
         );
         this.rtcConfig = opts.rtcConfig ?? cloneDefaultRtcConfig();
         this.channelName = opts.channelName ?? "y-webtorrent";
-        this.peerId = opts.peerId || createPeerId();
+        this.peerId = opts.peerId === undefined ? createPeerId() : validatePeerId(opts.peerId);
         this.debug = !!opts.debug;
         this._WebSocket = opts.WebSocket;
         this._RTCPeerConnection = opts.RTCPeerConnection;
@@ -285,8 +290,11 @@ export class WebtorrentProvider extends Observable<string> {
                         );
                     },
                     onAnnounce: (message: Parameters<TrackerConnection["onAnnounce"]>[0]) => {
-                        if (this.isCurrentGeneration(generation)) {
-                            this.emit("status", [{ status: "connected", message }]);
+                        if (this.isCurrentGeneration(generation)) this.emit("announce", [message]);
+                    },
+                    onState: (status: Parameters<TrackerConnection["onState"]>[0]) => {
+                        if (generation === this.connectionGeneration) {
+                            this.emit("status", [{ status, tracker: url }]);
                         }
                     },
                     onError: (error: unknown) => {
@@ -313,6 +321,7 @@ export class WebtorrentProvider extends Observable<string> {
         const count = Math.min(this.numwant, capacity);
         const records: OfferRecord[] = [];
         const offerPromises: Promise<void>[] = [];
+        let negotiationFailed = false;
 
         for (let i = 0; i < count; i++) {
             const offerId = createPeerId();
@@ -321,6 +330,7 @@ export class WebtorrentProvider extends Observable<string> {
                 peer = this.createPeer(null, true, generation);
             } catch (error) {
                 this.emit("peer-error", [error]);
+                negotiationFailed = true;
                 continue;
             }
             this.pendingPeers.add(peer);
@@ -346,7 +356,10 @@ export class WebtorrentProvider extends Observable<string> {
             offerPromises,
             this.offerCollectionTimeout,
             (error) => {
-                if (this.isCurrentGeneration(generation)) this.emit("peer-error", [error]);
+                if (this.isCurrentGeneration(generation)) {
+                    negotiationFailed = true;
+                    this.emit("peer-error", [error]);
+                }
             },
         );
 
@@ -363,6 +376,7 @@ export class WebtorrentProvider extends Observable<string> {
             }
         }
 
+        if (negotiationFailed) this.requestRecoveryAnnounce();
         this.emitDebug({ type: "offers-created", count: offers.length, requested: count });
         return offers;
     }
@@ -414,6 +428,7 @@ export class WebtorrentProvider extends Observable<string> {
             peer = this.createPeer(peerId, false, generation);
         } catch (error) {
             this.emit("peer-error", [error]);
+            this.requestRecoveryAnnounce();
             return;
         }
         this.pendingPeers.add(peer);
@@ -434,6 +449,7 @@ export class WebtorrentProvider extends Observable<string> {
                     ]);
                 }
                 this.cancelPendingPeer(peer);
+                this.requestRecoveryAnnounce();
                 return;
             }
         } catch (error) {
@@ -442,6 +458,7 @@ export class WebtorrentProvider extends Observable<string> {
             }
             this.emit("peer-error", [error]);
             this.cancelPendingPeer(peer);
+            this.requestRecoveryAnnounce();
         }
     }
 
@@ -503,6 +520,7 @@ export class WebtorrentProvider extends Observable<string> {
             }
             this.emit("peer-error", [error]);
             this.cancelPendingPeer(pending.peer);
+            this.requestRecoveryAnnounce();
         }
     }
 
@@ -683,7 +701,8 @@ export class WebtorrentProvider extends Observable<string> {
         this.connectionActive = false;
         this.connectionPromise = null;
         this.connectionGeneration++;
-        for (const tracker of this.trackerConnections) tracker.destroy();
+        const disconnectedTrackers = this.trackerConnections;
+        for (const tracker of disconnectedTrackers) tracker.destroy();
         this.trackerConnections = [];
         for (const peer of this.peers.values()) peer.destroy();
         for (const peer of this.pendingPeers) peer.destroy();
@@ -699,6 +718,13 @@ export class WebtorrentProvider extends Observable<string> {
             this.emit("synced", [false]);
         }
         if (localAwarenessState !== null) this.awareness.setLocalState(localAwarenessState);
+        for (const tracker of disconnectedTrackers) {
+            try {
+                this.emit("status", [{ status: "disconnected", tracker: tracker.url }]);
+            } catch {
+                // Status observers must not interrupt provider teardown.
+            }
+        }
     }
 
     override destroy(): void {

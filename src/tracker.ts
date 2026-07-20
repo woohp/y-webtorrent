@@ -51,6 +51,7 @@ export interface TrackerConnectionOptions {
     ) => void;
     onAnswer: (peerId: PeerId, offerId: OfferId, answer: TrackerSignal) => void;
     onAnnounce?: (message: TrackerAnnounceMessage) => void;
+    onState?: (state: "connected" | "reconnecting" | "disconnected") => void;
     onError?: (error: unknown) => void;
     connectTimeout?: number;
     announceResponseTimeout?: number;
@@ -67,6 +68,7 @@ export class TrackerConnection {
     readonly onOffer: TrackerConnectionOptions["onOffer"];
     readonly onAnswer: TrackerConnectionOptions["onAnswer"];
     readonly onAnnounce: NonNullable<TrackerConnectionOptions["onAnnounce"]>;
+    readonly onState: NonNullable<TrackerConnectionOptions["onState"]>;
     readonly onError: NonNullable<TrackerConnectionOptions["onError"]>;
     readonly WebSocket?: typeof WebSocket;
     readonly connectTimeout: number;
@@ -103,6 +105,7 @@ export class TrackerConnection {
         this.onOffer = opts.onOffer;
         this.onAnswer = opts.onAnswer;
         this.onAnnounce = opts.onAnnounce ?? (() => {});
+        this.onState = opts.onState ?? (() => {});
         this.onError = opts.onError ?? (() => {});
         this.WebSocket = opts.WebSocket ?? globalThis.WebSocket;
         this.connectTimeout = validateTimeout("connectTimeout", opts.connectTimeout ?? 10000);
@@ -137,8 +140,12 @@ export class TrackerConnection {
             this.socket = socket;
         } catch (error) {
             this.socket = null;
-            this.onError(error);
             this.scheduleReconnect();
+            try {
+                this.onError(error);
+            } finally {
+                this.reportState("reconnecting");
+            }
             return;
         }
 
@@ -152,19 +159,24 @@ export class TrackerConnection {
             }
             this.socket = null;
             this.connectTimer = undefined;
-            this.onError(new Error(`WebSocket connection timed out: ${this.url}`));
             try {
                 socket.close();
             } catch {
                 // Reconnection is still required if closing the stale socket fails.
             }
             this.scheduleReconnect();
+            try {
+                this.onError(new Error(`WebSocket connection timed out: ${this.url}`));
+            } finally {
+                this.reportState("reconnecting");
+            }
         }, this.connectTimeout);
 
         socket.addEventListener("open", () => {
             if (socket !== this.socket || this.destroyed) return;
             clearTimeout(this.connectTimer);
             this.connectTimer = undefined;
+            this.reportState("connected");
             void this.announce("started", socket).catch((error: unknown) => this.onError(error));
         });
         socket.addEventListener("message", (event) => {
@@ -184,6 +196,7 @@ export class TrackerConnection {
             clearTimeout(this.connectTimer);
             this.connectTimer = undefined;
             this.scheduleReconnect();
+            this.reportState("reconnecting");
         });
     }
 
@@ -393,8 +406,13 @@ export class TrackerConnection {
     }
 
     requestRecoveryAnnounce(): void {
-        if (this.destroyed || !this.isOpen() || this.recoveryAnnounceTimer) return;
+        if (this.destroyed || !this.isOpen()) return;
         const socket = this.socket;
+        if (this.announceInFlight?.socket === socket) {
+            this.announceInFlight.trailing = true;
+            return;
+        }
+        if (this.recoveryAnnounceTimer) return;
         const delay =
             Math.max(0, this.lastAnnounceAt + minimumRecoveryAnnounceDelay - Date.now()) +
             Math.random() * recoveryAnnounceJitter;
@@ -440,6 +458,14 @@ export class TrackerConnection {
         }
     }
 
+    private reportState(state: "connected" | "reconnecting" | "disconnected"): void {
+        try {
+            this.onState(state);
+        } catch {
+            // Observer failures must not alter tracker lifecycle transitions.
+        }
+    }
+
     isOpen(): this is this & { socket: WebSocket; WebSocket: typeof WebSocket } {
         return !!this.socket && !!this.WebSocket && this.socket.readyState === this.WebSocket.OPEN;
     }
@@ -454,16 +480,25 @@ export class TrackerConnection {
         this.connectTimer = undefined;
         this.clearAnnounceResponseTimeout();
         if (this.isOpen()) {
-            this.send({
-                action: "announce",
-                event: "stopped",
-                info_hash: this.infoHash,
-                peer_id: this.peerId,
-            });
+            try {
+                this.send({
+                    action: "announce",
+                    event: "stopped",
+                    info_hash: this.infoHash,
+                    peer_id: this.peerId,
+                });
+            } catch {
+                // Final cleanup must continue if diagnostics from the stopped announce fail.
+            }
         }
         for (const socket of this.announcedOffers.keys()) this.cancelSocketOffers(socket);
-        this.socket?.close();
+        try {
+            this.socket?.close();
+        } catch {
+            // The wrapper is still terminal if the injected socket throws while closing.
+        }
         this.socket = null;
+        this.reportState("disconnected");
     }
 }
 

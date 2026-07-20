@@ -35,7 +35,7 @@ provider.on("direct-message", (peerId, data) => {
 - `trackers`: WebSocket tracker URLs.
 - `awareness`: optional `y-protocols/awareness` instance.
 - `maxConns`: maximum WebRTC peers, default `20`.
-- `numwant`: offers to create per tracker announce, default `3`.
+- `numwant`: offers to create per tracker announce, default `3` capped by `maxConns` (therefore `0` when `maxConns` is `0`).
 - `offerTimeout`: max milliseconds to wait for ICE gathering before using the current local description, default `5000`.
 - `offerCollectionTimeout`: outer deadline for all native offer-creation work, default `offerTimeout + 5000`.
 - `signalTimeout`: max milliseconds for a signaled peer to open, default `15000`.
@@ -49,6 +49,8 @@ provider.on("direct-message", (peerId, data) => {
 - `debug`: emit verbose `debug` events, default `false`.
 - `WebSocket`: injectable WebSocket constructor, mostly for tests/non-browser runtimes.
 - `RTCPeerConnection`: injectable WebRTC constructor for tests/non-browser runtimes.
+
+Tracker lifecycle is emitted through `status` events (`connected`, `reconnecting`, or `disconnected`). Valid swarm statistics are emitted separately through `announce` events.
 
 Signaling timeouts and unexpected peer loss request a debounced recovery announce, limited to at most one attempt per tracker every five seconds plus up to one second of jitter.
 
