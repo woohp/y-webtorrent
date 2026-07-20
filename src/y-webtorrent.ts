@@ -700,8 +700,10 @@ export class WebtorrentProvider extends Observable<string> {
         for (const observer of Array.from(observers)) {
             try {
                 observer(...args);
-            } catch {
-                // Observers must not interrupt each other or provider lifecycle work.
+            } catch (error) {
+                if (eventName !== "listener-error") {
+                    this.emitSafely("listener-error", [{ eventName, error }]);
+                }
             }
         }
     }

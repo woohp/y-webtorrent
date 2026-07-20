@@ -726,14 +726,21 @@ test("throwing peers listeners cannot prevent peer-loss recovery", async () => {
     provider.peerIds.set(peer, "remote");
     provider.peers.set("remote", peer);
     let laterListenerCalls = 0;
+    const listenerFailure = new Error("peers listener failed");
+    const listenerErrors = [];
     provider.on("peers", () => {
-        throw new Error("peers listener failed");
+        throw listenerFailure;
     });
     provider.on("peers", () => laterListenerCalls++);
+    provider.on("listener-error", () => {
+        throw new Error("listener-error handler failed");
+    });
+    provider.on("listener-error", (event) => listenerErrors.push(event));
 
     assert.doesNotThrow(() => provider.removePeer(peer));
     assert.equal(recoveryAnnounces, 1);
     assert.equal(laterListenerCalls, 1);
+    assert.deepEqual(listenerErrors, [{ eventName: "peers", error: listenerFailure }]);
     provider.destroy();
 });
 
