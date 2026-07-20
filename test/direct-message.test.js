@@ -45,13 +45,18 @@ function createProvider(peerId) {
     return new WebtorrentProvider("test-room", new Y.Doc(), { peerId, trackers: [] });
 }
 
-test("uses public STUN servers by default and allows rtcConfig overrides", () => {
+test("uses isolated public STUN defaults and allows rtcConfig overrides", () => {
     const provider = createProvider("default-rtc");
-    assert.equal(provider.rtcConfig, defaultRtcConfig);
+    const otherDefault = createProvider("other-default-rtc");
+    assert.notEqual(provider.rtcConfig, defaultRtcConfig);
+    assert.notEqual(provider.rtcConfig.iceServers, defaultRtcConfig.iceServers);
     assert.deepEqual(provider.rtcConfig.iceServers, [
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun.cloudflare.com:3478" },
     ]);
+    provider.rtcConfig.iceServers.push({ urls: "stun:instance-only.test" });
+    assert.equal(otherDefault.rtcConfig.iceServers.length, 2);
+    assert.equal(defaultRtcConfig.iceServers.length, 2);
 
     const rtcConfig = { iceServers: [] };
     const overridden = new WebtorrentProvider("test-room", new Y.Doc(), {
@@ -62,7 +67,56 @@ test("uses public STUN servers by default and allows rtcConfig overrides", () =>
     assert.equal(overridden.rtcConfig, rtcConfig);
 
     provider.destroy();
+    otherDefault.destroy();
     overridden.destroy();
+});
+
+test("deeply isolates nested default ICE server values", () => {
+    const originalIceServers = defaultRtcConfig.iceServers;
+    let first;
+    let second;
+    try {
+        defaultRtcConfig.iceServers = [
+            { urls: ["stun:first.test", "stun:second.test"], username: "default-user" },
+        ];
+        first = createProvider("nested-default-first");
+        second = createProvider("nested-default-second");
+
+        first.rtcConfig.iceServers[0].username = "instance-user";
+        first.rtcConfig.iceServers[0].urls.push("stun:instance-only.test");
+
+        assert.equal(second.rtcConfig.iceServers[0].username, "default-user");
+        assert.deepEqual(second.rtcConfig.iceServers[0].urls, [
+            "stun:first.test",
+            "stun:second.test",
+        ]);
+        assert.equal(defaultRtcConfig.iceServers[0].username, "default-user");
+        assert.deepEqual(defaultRtcConfig.iceServers[0].urls, [
+            "stun:first.test",
+            "stun:second.test",
+        ]);
+    } finally {
+        first?.destroy();
+        second?.destroy();
+        defaultRtcConfig.iceServers = originalIceServers;
+    }
+});
+
+test("normalizes transport debug event types", () => {
+    const provider = new WebtorrentProvider("test-room", new Y.Doc(), {
+        peerId: "debug-events",
+        trackers: [],
+        debug: true,
+    });
+    const events = [];
+    provider.on("debug", (event) => events.push(event));
+    const peer = provider.createPeer("remote", true);
+
+    peer.onDebug({ type: 42, detail: "preserved" });
+
+    assert.deepEqual(events.at(-1), { type: "42", detail: "preserved" });
+    peer.destroy();
+    provider.destroy();
 });
 
 test("sendToPeer sends a directed binary message to only the selected peer", async () => {

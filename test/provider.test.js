@@ -608,11 +608,74 @@ test("pending signaled peers expire", async (context) => {
     };
     provider.pendingPeers.add(peer);
     provider.pendingOffers.set("offer", { peer, tracker: {} });
+    provider.startPeerTimeout(peer);
 
     await provider.receiveAnswer("remote", "offer", { type: "answer", sdp: "answer" });
     context.mock.timers.tick(100);
 
     assert.equal(destroyed, 1);
     assert.equal(provider.pendingPeers.size, 0);
+    provider.destroy();
+});
+test("signal timeout frees capacity while accepting an offer is stuck", async (context) => {
+    const provider = createProvider("stuck-accept-offer", { maxConns: 1, signalTimeout: 100 });
+    await provider.ready;
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    installSignalingPeers(provider);
+    const createPeer = provider.createPeer.bind(provider);
+    let createdCount = 0;
+    provider.createPeer = (...args) => {
+        const peer = createPeer(...args);
+        if (createdCount++ === 0) peer.acceptOffer = () => new Promise(() => {});
+        return peer;
+    };
+    const errors = [];
+    provider.on("peer-error", (error) => errors.push(error));
+    const tracker = createFakeTracker();
+
+    void provider.receiveOffer("remote-1", "offer-1", { type: "offer", sdp: "stuck" }, tracker);
+    assert.equal(provider.pendingPeers.size, 1);
+    assert.equal(provider.pendingPeerIds.size, 1);
+    context.mock.timers.tick(100);
+
+    assert.equal(provider.pendingPeers.size, 0);
+    assert.equal(provider.pendingPeerIds.size, 0);
+    assert.equal(provider.pendingOffers.size, 0);
+    assert.deepEqual(errors, []);
+
+    await provider.receiveOffer("remote-2", "offer-2", { type: "offer", sdp: "usable" }, tracker);
+    assert.equal(tracker.answers.length, 1);
+    assert.equal(provider.pendingPeers.size, 1);
+    provider.destroy();
+});
+
+test("signal timeout frees capacity while accepting an answer is stuck", async (context) => {
+    const provider = createProvider("stuck-accept-answer", {
+        maxConns: 1,
+        numwant: 1,
+        signalTimeout: 100,
+    });
+    await provider.ready;
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const peers = installSignalingPeers(provider);
+    const errors = [];
+    provider.on("peer-error", (error) => errors.push(error));
+    const [offer] = await provider.createOffers();
+    peers[0].acceptAnswer = () => new Promise(() => {});
+
+    void provider.receiveAnswer("remote-1", offer.offer_id, {
+        type: "answer",
+        sdp: "stuck",
+    });
+    assert.equal(provider.pendingPeerIds.size, 1);
+    context.mock.timers.tick(100);
+
+    assert.equal(provider.pendingPeers.size, 0);
+    assert.equal(provider.pendingPeerIds.size, 0);
+    assert.equal(provider.pendingOffers.size, 0);
+    assert.deepEqual(errors, []);
+
+    const replacementOffers = await provider.createOffers();
+    assert.equal(replacementOffers.length, 1);
     provider.destroy();
 });

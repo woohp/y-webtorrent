@@ -25,6 +25,14 @@ export const defaultRtcConfig: RTCConfiguration = {
     ],
 };
 
+const cloneDefaultRtcConfig = (): RTCConfiguration => {
+    const iceServers = defaultRtcConfig.iceServers?.map((server) => ({
+        ...server,
+        urls: Array.isArray(server.urls) ? [...server.urls] : server.urls,
+    }));
+    return { ...defaultRtcConfig, ...(iceServers ? { iceServers } : {}) };
+};
+
 const messageSync = 0;
 const messageAwareness = 1;
 const messageQueryAwareness = 3;
@@ -147,7 +155,7 @@ export class WebtorrentProvider extends Observable<string> {
         this.trackerConnectTimeout = opts.trackerConnectTimeout ?? 10000;
         this.fallbackMaxMessageSize = opts.fallbackMaxMessageSize ?? 256 * 1024;
         this.maxBufferedAmount = opts.maxBufferedAmount ?? 4 * 1024 * 1024;
-        this.rtcConfig = opts.rtcConfig ?? defaultRtcConfig;
+        this.rtcConfig = opts.rtcConfig ?? cloneDefaultRtcConfig();
         this.channelName = opts.channelName ?? "y-webtorrent";
         this.peerId = opts.peerId || createPeerId();
         this.debug = !!opts.debug;
@@ -351,6 +359,7 @@ export class WebtorrentProvider extends Observable<string> {
         }
         this.pendingPeers.add(peer);
         this.pendingPeerIds.set(peerId, peer);
+        this.startPeerTimeout(peer);
         try {
             const answer = await peer.acceptOffer(offer);
             this.emitDebug({ type: "answer-created", peerId, offerId });
@@ -368,7 +377,6 @@ export class WebtorrentProvider extends Observable<string> {
                 this.cancelPendingPeer(peer);
                 return;
             }
-            this.startPeerTimeout(peer);
         } catch (error) {
             if (!this.isCurrentGeneration(generation) || this.pendingPeerIds.get(peerId) !== peer) {
                 return;
@@ -414,7 +422,6 @@ export class WebtorrentProvider extends Observable<string> {
         }
 
         this.pendingOffers.delete(offerId);
-        this.clearPeerTimeout(pending.peer);
         this.peerIds.set(pending.peer, peerId);
         this.pendingPeerIds.set(peerId, pending.peer);
         try {
@@ -426,7 +433,6 @@ export class WebtorrentProvider extends Observable<string> {
                 this.cancelPendingPeer(pending.peer);
                 return;
             }
-            this.startPeerTimeout(pending.peer);
         } catch (error) {
             if (
                 !this.isCurrentGeneration(generation) ||
@@ -458,7 +464,7 @@ export class WebtorrentProvider extends Observable<string> {
             onError: (_peer, error) => {
                 if (this.isCurrentGeneration(generation)) this.emit("peer-error", [error]);
             },
-            onDebug: (event) => this.emitDebug({ type: String(event["type"]), ...event }),
+            onDebug: (event) => this.emitDebug({ ...event, type: String(event["type"]) }),
         });
         this.peerIds.set(peer, remotePeerId);
         this.emitDebug({
