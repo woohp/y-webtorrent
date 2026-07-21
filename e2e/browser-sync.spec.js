@@ -70,6 +70,11 @@ test("syncs text between two browser tabs over WebRTC", async ({ browser }) => {
     const url = `/?room=${room}&trackers=${encodeURIComponent(trackerUrl)}`;
 
     await Promise.all([first.goto(url), second.goto(url)]);
+    // bootstrap.js loads the application with a dynamic import, which can finish after `load`.
+    await Promise.all([
+        expect(first.locator("#status")).toContainText(`room: ${room}`),
+        expect(second.locator("#status")).toContainText(`room: ${room}`),
+    ]);
     await Promise.all([
         first.getByRole("button", { name: "Connect", exact: true }).click(),
         second.getByRole("button", { name: "Connect", exact: true }).click(),
