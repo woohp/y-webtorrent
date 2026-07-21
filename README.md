@@ -65,7 +65,7 @@ npm run build
 npm run check
 ```
 
-The package is authored in TypeScript and built with TypeScript native preview/`tsgo` to `dist/`, including `.d.ts` declarations.
+The package is authored in TypeScript and built to `dist/`, including `.d.ts` declarations.
 
 ## Browser smoke test
 
