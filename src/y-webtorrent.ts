@@ -74,8 +74,29 @@ const messageAwareness = 1;
 const messageQueryAwareness = 3;
 const messageDirect = 4;
 
+/**
+ * The transport surface the provider actually depends on. `WebrtcDataPeer` satisfies this
+ * structurally, so naming it costs nothing at runtime; it exists to keep provider logic
+ * independent of the concrete transport and to state plainly how little of it is used.
+ */
+export interface DataPeer {
+    readonly initiator: boolean;
+    readonly connected: boolean;
+    /**
+     * Narrowed to the one member the provider reads. The read is deliberately late — see
+     * `collectOffers`, which prefers the description as amended by ongoing ICE gathering
+     * over whatever `createOffer` resolved with.
+     */
+    readonly pc: { readonly localDescription: RTCSessionDescription | null };
+    createOffer(): Promise<TrackerSignal>;
+    acceptOffer(offer: TrackerSignal): Promise<TrackerSignal>;
+    acceptAnswer(answer: TrackerSignal): Promise<void>;
+    send(data: Uint8Array<ArrayBuffer>): boolean;
+    destroy(): void;
+}
+
 type PendingOffer = {
-    peer: WebrtcDataPeer;
+    peer: DataPeer;
     canceled: boolean;
 };
 type OfferRecord = PendingOffer & { offerId: OfferId; offered: boolean };
@@ -132,7 +153,7 @@ export interface WebtorrentProviderEvents {
 
 const readMessage = (
     provider: WebtorrentProvider,
-    peer: WebrtcDataPeer,
+    peer: DataPeer,
     peerId: PeerId | null,
     data: ArrayBuffer,
     sendProtocolMessage: (message: Uint8Array<ArrayBuffer>) => boolean,
@@ -187,14 +208,14 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     synced = false;
     infoHash: string | null = null;
     private trackerConnections: TrackerConnection[] = [];
-    private peers: Map<PeerId, WebrtcDataPeer> = new Map();
+    private peers: Map<PeerId, DataPeer> = new Map();
     private pendingOffers: Map<OfferId, PendingOffer> = new Map();
-    private readonly pendingPeerIds = new Map<PeerId, WebrtcDataPeer>();
-    private readonly pendingPeers = new Set<WebrtcDataPeer>();
-    private readonly pendingTimers = new Map<WebrtcDataPeer, ReturnType<typeof setTimeout>>();
-    private readonly syncedPeers = new Set<WebrtcDataPeer>();
-    private readonly peerIds = new WeakMap<WebrtcDataPeer, PeerId | null>();
-    private readonly peerStartedAt = new WeakMap<WebrtcDataPeer, number>();
+    private readonly pendingPeerIds = new Map<PeerId, DataPeer>();
+    private readonly pendingPeers = new Set<DataPeer>();
+    private readonly pendingTimers = new Map<DataPeer, ReturnType<typeof setTimeout>>();
+    private readonly syncedPeers = new Set<DataPeer>();
+    private readonly peerIds = new WeakMap<DataPeer, PeerId | null>();
+    private readonly peerStartedAt = new WeakMap<DataPeer, number>();
     private readonly _WebSocket: typeof WebSocket | undefined;
     private readonly _RTCPeerConnection: typeof RTCPeerConnection | undefined;
     private readonly _ownsAwareness: boolean;
@@ -361,7 +382,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
 
         for (let i = 0; i < count; i++) {
             const offerId = createPeerId();
-            let peer: WebrtcDataPeer;
+            let peer: DataPeer;
             try {
                 peer = this.createPeer(null, true, generation);
             } catch (error) {
@@ -471,7 +492,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
         if (this.peers.size + this.pendingPeers.size > this.maxConns) return;
 
-        let peer: WebrtcDataPeer;
+        let peer: DataPeer;
         try {
             peer = this.createPeer(peerId, false, generation);
         } catch (error) {
@@ -585,7 +606,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         remotePeerId: PeerId | null,
         initiator: boolean,
         generation: number = this.connectionGeneration,
-    ): WebrtcDataPeer {
+    ): DataPeer {
         const peer = new WebrtcDataPeer({
             initiator,
             rtcConfig: this.rtcConfig,
@@ -616,7 +637,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     private onPeerOpen(
-        peer: WebrtcDataPeer,
+        peer: DataPeer,
         initiator: boolean,
         generation: number = this.connectionGeneration,
     ): void {
@@ -654,7 +675,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     private onPeerMessage(
-        peer: WebrtcDataPeer,
+        peer: DataPeer,
         data: ArrayBuffer,
         generation: number = this.connectionGeneration,
     ): void {
@@ -682,7 +703,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
     }
 
-    private removePeer(peer: WebrtcDataPeer, generation: number = this.connectionGeneration): void {
+    private removePeer(peer: DataPeer, generation: number = this.connectionGeneration): void {
         if (generation !== this.connectionGeneration) return;
         this.syncedPeers.delete(peer);
         this.updateSyncedState();
@@ -699,7 +720,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
     }
 
-    private sendProtocolMessage(peer: WebrtcDataPeer, message: Uint8Array<ArrayBuffer>): boolean {
+    private sendProtocolMessage(peer: DataPeer, message: Uint8Array<ArrayBuffer>): boolean {
         try {
             if (peer.send(message)) return true;
         } catch (error) {
@@ -709,14 +730,14 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         return false;
     }
 
-    private sendSyncStep1(peer: WebrtcDataPeer): boolean {
+    private sendSyncStep1(peer: DataPeer): boolean {
         const encoder = encoding.createEncoder();
         encoding.writeVarUint(encoder, messageSync);
         syncProtocol.writeSyncStep1(encoder, this.doc);
         return this.sendProtocolMessage(peer, encoding.toUint8Array(encoder));
     }
 
-    private sendAwareness(peer: WebrtcDataPeer): boolean {
+    private sendAwareness(peer: DataPeer): boolean {
         const states = Array.from(this.awareness.getStates().keys());
         if (states.length === 0) return true;
         const encoder = encoding.createEncoder();
@@ -844,12 +865,12 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         for (const tracker of this.trackerConnections) tracker.requestRecoveryAnnounce();
     }
 
-    private cancelPendingPeer(peer: WebrtcDataPeer): void {
+    private cancelPendingPeer(peer: DataPeer): void {
         this.clearPendingPeer(peer);
         peer.destroy();
     }
 
-    private clearPendingPeer(peer: WebrtcDataPeer): void {
+    private clearPendingPeer(peer: DataPeer): void {
         this.pendingPeers.delete(peer);
         this.clearPeerTimeout(peer);
         for (const [peerId, pending] of this.pendingPeerIds) {
@@ -863,7 +884,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
     }
 
-    private startPeerTimeout(peer: WebrtcDataPeer): void {
+    private startPeerTimeout(peer: DataPeer): void {
         this.clearPeerTimeout(peer);
         this.pendingTimers.set(
             peer,
@@ -875,7 +896,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         );
     }
 
-    private clearPeerTimeout(peer: WebrtcDataPeer): void {
+    private clearPeerTimeout(peer: DataPeer): void {
         clearTimeout(this.pendingTimers.get(peer));
         this.pendingTimers.delete(peer);
     }
