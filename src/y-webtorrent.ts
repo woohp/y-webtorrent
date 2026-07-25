@@ -6,6 +6,7 @@ import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 import { ObservableV2 } from "lib0/observable";
 import { createInfoHash, createPeerId } from "./crypto.js";
+import { collectCandidateTypes } from "./sdp.js";
 import {
     TrackerConnection,
     defaultTrackerUrls,
@@ -924,14 +925,4 @@ const collectOffers = async (
         }
     }
     return offers;
-};
-
-const collectCandidateTypes = (signals: readonly RTCSessionDescriptionInit[]): string[] => {
-    const candidateTypes = new Set<string>();
-    for (const signal of signals) {
-        for (const match of signal.sdp?.matchAll(/\btyp\s+(host|srflx|prflx|relay)\b/g) ?? []) {
-            candidateTypes.add(match[1]!);
-        }
-    }
-    return [...candidateTypes].sort();
 };
