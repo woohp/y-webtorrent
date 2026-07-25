@@ -416,7 +416,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             type: "offers-created",
             count: offers.length,
             requested: count,
-            elapsedMs: Date.now() - startedAt,
+            batchElapsedMs: Date.now() - startedAt,
             candidateTypes: collectCandidateTypes(offers.map((entry) => entry.offer)),
         });
         return offers;
@@ -489,7 +489,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                 peerId,
                 offerId,
                 tracker: tracker.url,
-                elapsedMs: Date.now() - startedAt,
+                answerElapsedMs: Date.now() - startedAt,
                 candidateTypes: collectCandidateTypes([answer]),
             });
             if (!this.isCurrentGeneration(generation) || this.pendingPeerIds.get(peerId) !== peer) {
@@ -639,11 +639,14 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
         this.clearPendingPeer(peer);
         this.peers.set(peerId, peer);
+        const startedAt = this.peerStartedAt.get(peer);
         this.emitDebug({
             type: "peer-connect",
             peerId,
             initiator,
-            elapsedMs: Date.now() - (this.peerStartedAt.get(peer) ?? Date.now()),
+            // Omitted rather than zeroed when unknown: 0 is also a legitimate same-tick open,
+            // and a missing start time means the peer bypassed `createPeer`.
+            ...(startedAt === undefined ? {} : { connectElapsedMs: Date.now() - startedAt }),
         });
         if (!this.sendSyncStep1(peer) || !this.sendAwareness(peer)) return;
         this.emitSafely("peers", [Array.from(this.peers.keys())]);
@@ -773,6 +776,11 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
     }
 
+    /**
+     * Builds the payload only when `debug` is enabled. Several diagnostics scan full SDP
+     * blobs, so an eagerly-built payload would cost real work on the signaling path in the
+     * default (`debug: false`) configuration.
+     */
     private emitDebug(event: DebugEvent): void {
         if (this.debug) this.emitSafely("debug", [event]);
     }
