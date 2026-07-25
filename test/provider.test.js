@@ -49,6 +49,14 @@ const createProvider = (peerId, opts = {}) =>
 
 const copyBuffer = (message) => message.slice().buffer;
 
+// Registers a fake transport the way `createPeer` does. `open: true` additionally promotes it,
+// standing in for a data channel that has already opened.
+const registerPeer = (provider, peer, peerId = null, { open = false } = {}) => {
+    provider.registry.add(peer, peerId, Date.now());
+    if (open) provider.registry.promote(peer);
+    return peer;
+};
+
 const installSignalingPeers = (provider, createOffer) => {
     const created = [];
     provider.createPeer = (remotePeerId, initiator, generation = provider.connectionGeneration) => {
@@ -80,7 +88,7 @@ const installSignalingPeers = (provider, createOffer) => {
                 return destroyed;
             },
         };
-        provider.peerIds.set(peer, remotePeerId);
+        registerPeer(provider, peer, remotePeerId);
         created.push(peer);
         return peer;
     };
@@ -123,10 +131,11 @@ const connectProviders = (first, second) => {
             second.removePeer(secondPeer);
         },
     };
-    first.peerIds.set(firstPeer, second.peerId);
-    second.peerIds.set(secondPeer, first.peerId);
-    first.peers.set(second.peerId, firstPeer);
-    second.peers.set(first.peerId, secondPeer);
+    // Both sides must be open before either handshake starts: `onPeerOpen` sends Sync Step 1
+    // synchronously into the other provider, which drops frames from a peer it does not yet
+    // consider open. Promoting one at a time would sync only one direction.
+    registerPeer(first, firstPeer, second.peerId, { open: true });
+    registerPeer(second, secondPeer, first.peerId, { open: true });
     first.onPeerOpen(firstPeer, true);
     second.onPeerOpen(secondPeer, false);
     return { firstPeer, secondPeer };
@@ -144,7 +153,7 @@ test("syncs documents and waits for Sync Step 2 before setting synced", async ()
         send: () => true,
         destroy: () => {},
     };
-    first.peerIds.set(unopenedPeer, "unopened");
+    registerPeer(first, unopenedPeer, "unopened");
     first.onPeerOpen(unopenedPeer, true);
     assert.equal(first.synced, false);
     first.removePeer(unopenedPeer);
@@ -176,7 +185,7 @@ test("protocol send failure and malformed frames destroy the affected peer", asy
             sendFailureDestroyed++;
         },
     };
-    provider.peerIds.set(sendFailurePeer, "send-failure");
+    registerPeer(provider, sendFailurePeer, "send-failure");
 
     provider.onPeerOpen(sendFailurePeer, true);
     assert.equal(sendFailureDestroyed, 1);
@@ -189,8 +198,7 @@ test("protocol send failure and malformed frames destroy the affected peer", asy
             malformedDestroyed++;
         },
     };
-    provider.peerIds.set(malformedPeer, "malformed");
-    provider.peers.set("malformed", malformedPeer);
+    registerPeer(provider, malformedPeer, "malformed", { open: true });
     provider.on("peer-error", () => {
         throw new Error("peer-error listener failed");
     });
@@ -205,14 +213,19 @@ test("disconnect removes and restores owned awareness", async () => {
     const localState = { user: "local" };
     provider.awareness.setLocalState(localState);
     const sent = [];
-    provider.peers.set("presence-peer", {
-        connected: true,
-        send: (message) => {
-            sent.push(message);
-            return true;
+    registerPeer(
+        provider,
+        {
+            connected: true,
+            send: (message) => {
+                sent.push(message);
+                return true;
+            },
+            destroy: () => {},
         },
-        destroy: () => {},
-    });
+        "presence-peer",
+        { open: true },
+    );
 
     provider.disconnect();
 
@@ -266,8 +279,8 @@ for (const order of ["lower-first", "higher-first"]) {
         const routedAnswer = higherTracker.answers[0];
         await lower.receiveAnswer(higher.peerId, routedAnswer.offerId, routedAnswer.answer);
 
-        const lowerPeer = lower.pendingPeerIds.get(higher.peerId);
-        const higherPeer = higher.pendingPeerIds.get(lower.peerId);
+        const lowerPeer = lower.registry.pendingPeer(higher.peerId);
+        const higherPeer = higher.registry.pendingPeer(lower.peerId);
         assert.equal(lowerPeer.initiator, true);
         assert.equal(higherPeer.initiator, false);
         lowerPeer.connected = true;
@@ -281,8 +294,9 @@ for (const order of ["lower-first", "higher-first"]) {
             return true;
         };
         lower.doc.getText("shared").insert(0, "lower");
-        lower.peers.set(higher.peerId, lowerPeer);
-        higher.peers.set(lower.peerId, higherPeer);
+        // Open both before either handshake, as in `connectProviders`.
+        lower.registry.promote(lowerPeer);
+        higher.registry.promote(higherPeer);
         lower.onPeerOpen(lowerPeer, true);
         higher.onPeerOpen(higherPeer, false);
 
@@ -308,7 +322,7 @@ for (const [localId, remoteId, keepsOutbound] of [
             type: "answer",
             sdp: "answer-first",
         });
-        const outbound = provider.pendingPeerIds.get(remoteId);
+        const outbound = provider.registry.pendingPeer(remoteId);
 
         await provider.receiveOffer(
             remoteId,
@@ -317,7 +331,7 @@ for (const [localId, remoteId, keepsOutbound] of [
             tracker,
         );
 
-        const survivor = provider.pendingPeerIds.get(remoteId);
+        const survivor = provider.registry.pendingPeer(remoteId);
         assert.equal(survivor.initiator, keepsOutbound);
         assert.equal(outbound.destroyed, !keepsOutbound);
         assert.equal(tracker.answers.length, keepsOutbound ? 0 : 1);
@@ -335,14 +349,14 @@ test("lower peer replaces a pending inbound duplicate with its outbound peer", a
         { type: "offer", sdp: "remote" },
         tracker,
     );
-    const inbound = lower.pendingPeerIds.get("b".repeat(20));
+    const inbound = lower.registry.pendingPeer("b".repeat(20));
     assert.equal(inbound.initiator, false);
     const offers = await lower.createOffers();
 
     await lower.receiveAnswer("b".repeat(20), offers[0].offer_id, { type: "answer", sdp: "local" });
 
     assert.equal(inbound.destroyed, true);
-    assert.equal(lower.pendingPeerIds.get("b".repeat(20)), peers.at(-1));
+    assert.equal(lower.registry.pendingPeer("b".repeat(20)), peers.at(-1));
     assert.equal(peers.at(-1).initiator, true);
     lower.destroy();
 });
@@ -364,9 +378,9 @@ test("peer opening during answer acceptance is preserved", async () => {
     });
 
     assert.equal(peer.destroyed, false);
-    assert.equal(provider.peers.get("remote"), peer);
-    assert.equal(provider.pendingPeers.size, 0);
-    assert.equal(provider.pendingPeerIds.size, 0);
+    assert.equal(provider.registry.openPeer("remote"), peer);
+    assert.equal(provider.registry.pendingCount, 0);
+    assert.equal(provider.registry.pendingPeer("remote"), undefined);
     provider.destroy();
 });
 
@@ -400,8 +414,7 @@ test("canceling an unpublished offer batch restores capacity", async () => {
     provider.cancelOffers([offer.offer_id]);
 
     assert.equal(provider.pendingOffers.size, 0);
-    assert.equal(provider.pendingPeers.size, 0);
-    assert.equal(provider.pendingPeerIds.size, 0);
+    assert.equal(provider.registry.pendingCount, 0);
     assert.deepEqual(forgotten, [offer.offer_id]);
     const replacements = await provider.createOffers();
     assert.equal(replacements.length, 1);
@@ -428,14 +441,14 @@ test("canceled outbound peer cannot regain a timeout after acceptAnswer resolves
         { type: "offer", sdp: "competing" },
         tracker,
     );
-    const inbound = higher.pendingPeerIds.get("a".repeat(20));
+    const inbound = higher.registry.pendingPeer("a".repeat(20));
     assert.equal(inbound.initiator, false);
     assert.equal(outbound.destroyed, true);
     resolveAnswer();
     await receivingAnswer;
 
-    assert.equal(higher.pendingTimers.has(outbound), false);
-    assert.equal(higher.pendingPeerIds.get("a".repeat(20)), inbound);
+    assert.equal(higher.registry.get(outbound)?.timer, undefined);
+    assert.equal(higher.registry.pendingPeer("a".repeat(20)), inbound);
     higher.destroy();
 });
 test("canceled unresolved offers cannot later be announced", async () => {
@@ -458,7 +471,7 @@ test("canceled unresolved offers cannot later be announced", async () => {
 
     assert.deepEqual(offers, []);
     assert.equal(higher.pendingOffers.size, 0);
-    assert.equal(higher.pendingPeers.size, 1);
+    assert.equal(higher.registry.pendingCount, 1);
     higher.destroy();
 });
 
@@ -469,8 +482,7 @@ test("unrelated outbound answers cannot exceed connected capacity", async () => 
     const offers = await provider.createOffers();
     const outbound = provider.pendingOffers.get(offers[0].offer_id).peer;
     const activePeer = { connected: true, initiator: false, send: () => true, destroy: () => {} };
-    provider.peerIds.set(activePeer, "already-connected");
-    provider.peers.set("already-connected", activePeer);
+    registerPeer(provider, activePeer, "already-connected", { open: true });
 
     await provider.receiveAnswer("different-peer", offers[0].offer_id, {
         type: "answer",
@@ -478,7 +490,7 @@ test("unrelated outbound answers cannot exceed connected capacity", async () => 
     });
 
     assert.equal(outbound.destroyed, true);
-    assert.deepEqual(Array.from(provider.peers.keys()), ["already-connected"]);
+    assert.deepEqual(provider.registry.openPeerIds, ["already-connected"]);
 
     const latePeer = {
         connected: true,
@@ -489,12 +501,10 @@ test("unrelated outbound answers cannot exceed connected capacity", async () => 
             this.destroyed = true;
         },
     };
-    provider.peerIds.set(latePeer, "late-unrelated");
-    provider.pendingPeers.add(latePeer);
-    provider.pendingPeerIds.set("late-unrelated", latePeer);
+    registerPeer(provider, latePeer, "late-unrelated");
     provider.onPeerOpen(latePeer, false);
     assert.equal(latePeer.destroyed, true);
-    assert.equal(provider.peers.size, 1);
+    assert.equal(provider.registry.openCount, 1);
     provider.destroy();
 });
 test("glare cancellation removes only one of multiple outstanding offers", async () => {
@@ -514,8 +524,8 @@ test("glare cancellation removes only one of multiple outstanding offers", async
     );
 
     assert.equal(higher.pendingOffers.size, 1);
-    assert.equal(higher.pendingPeers.size, 2);
-    assert.equal(higher.pendingPeerIds.has("a".repeat(20)), true);
+    assert.equal(higher.registry.pendingCount, 2);
+    assert.ok(higher.registry.pendingPeer("a".repeat(20)));
     higher.destroy();
 });
 
@@ -637,7 +647,7 @@ test("offer collection timeout cancels ICE without peer errors", async (context)
 
     assert.deepEqual(offers, []);
     assert.deepEqual(errors, []);
-    assert.equal(provider.pendingPeers.size, 0);
+    assert.equal(provider.registry.pendingCount, 0);
     provider.destroy();
 });
 
@@ -749,8 +759,7 @@ test("throwing peers listeners cannot prevent peer-loss recovery", async () => {
         destroy: () => {},
     });
     const peer = { connected: true, send: () => true, destroy: () => {} };
-    provider.peerIds.set(peer, "remote");
-    provider.peers.set("remote", peer);
+    registerPeer(provider, peer, "remote", { open: true });
     let laterListenerCalls = 0;
     const listenerFailure = new Error("peers listener failed");
     const listenerErrors = [];
@@ -774,8 +783,7 @@ test("late Sync Step 2 from a removed peer cannot restore synced", async () => {
     const provider = createProvider("stale-sync");
     await provider.ready;
     const peer = { connected: true, send: () => true, destroy: () => {} };
-    provider.peerIds.set(peer, "removed");
-    provider.peers.set("removed", peer);
+    registerPeer(provider, peer, "removed", { open: true });
     provider.removePeer(peer);
     const encoder = encoding.createEncoder();
     encoding.writeVarUint(encoder, 0);
@@ -784,7 +792,7 @@ test("late Sync Step 2 from a removed peer cannot restore synced", async () => {
     provider.onPeerMessage(peer, encoding.toUint8Array(encoder).buffer);
 
     assert.equal(provider.synced, false);
-    assert.equal(provider.syncedPeers.size, 0);
+    assert.equal(provider.registry.hasSynced, false);
     provider.destroy();
 });
 
@@ -822,7 +830,7 @@ test("pending signaled peers expire", async (context) => {
             provider.removePeer(peer);
         },
     };
-    provider.pendingPeers.add(peer);
+    registerPeer(provider, peer);
     provider.pendingOffers.set("offer", { peer, tracker: {} });
     provider.startPeerTimeout(peer);
 
@@ -830,7 +838,7 @@ test("pending signaled peers expire", async (context) => {
     context.mock.timers.tick(100);
 
     assert.equal(destroyed, 1);
-    assert.equal(provider.pendingPeers.size, 0);
+    assert.equal(provider.registry.pendingCount, 0);
     provider.destroy();
 });
 test("signal timeout frees capacity while accepting an offer is stuck", async (context) => {
@@ -850,18 +858,18 @@ test("signal timeout frees capacity while accepting an offer is stuck", async (c
     const tracker = createFakeTracker();
 
     void provider.receiveOffer("remote-1", "offer-1", { type: "offer", sdp: "stuck" }, tracker);
-    assert.equal(provider.pendingPeers.size, 1);
-    assert.equal(provider.pendingPeerIds.size, 1);
+    assert.equal(provider.registry.pendingCount, 1);
+    assert.ok(provider.registry.pendingPeer("remote-1"));
     context.mock.timers.tick(100);
 
-    assert.equal(provider.pendingPeers.size, 0);
-    assert.equal(provider.pendingPeerIds.size, 0);
+    assert.equal(provider.registry.pendingCount, 0);
+    assert.equal(provider.registry.pendingPeer("remote-1"), undefined);
     assert.equal(provider.pendingOffers.size, 0);
     assert.deepEqual(errors, []);
 
     await provider.receiveOffer("remote-2", "offer-2", { type: "offer", sdp: "usable" }, tracker);
     assert.equal(tracker.answers.length, 1);
-    assert.equal(provider.pendingPeers.size, 1);
+    assert.equal(provider.registry.pendingCount, 1);
     provider.destroy();
 });
 
@@ -889,11 +897,11 @@ test("signal timeout frees capacity while accepting an answer is stuck", async (
         type: "answer",
         sdp: "stuck",
     });
-    assert.equal(provider.pendingPeerIds.size, 1);
+    assert.ok(provider.registry.pendingPeer("remote-1"));
     context.mock.timers.tick(100);
 
-    assert.equal(provider.pendingPeers.size, 0);
-    assert.equal(provider.pendingPeerIds.size, 0);
+    assert.equal(provider.registry.pendingCount, 0);
+    assert.equal(provider.registry.pendingPeer("remote-1"), undefined);
     assert.equal(provider.pendingOffers.size, 0);
     assert.deepEqual(errors, []);
     assert.equal(recoveryAnnounces, 1);

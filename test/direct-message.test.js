@@ -51,6 +51,13 @@ function createProvider(peerId, opts = {}) {
     });
 }
 
+// Registers a fake transport the way `createPeer` does, already promoted to open.
+function registerOpenPeer(provider, peerId, peer) {
+    provider.registry.add(peer, peerId, Date.now());
+    provider.registry.promote(peer);
+    return peer;
+}
+
 test("validates injected peer IDs", () => {
     for (const peerId of [
         "",
@@ -234,7 +241,7 @@ test("sendToPeer sends a directed binary message to only the selected peer", asy
     const sender = createProvider("sender");
     await sender.ready;
     const sent = [];
-    sender.peers.set("recipient", {
+    registerOpenPeer(sender, "recipient", {
         connected: true,
         send: (data) => {
             sent.push(data);
@@ -242,7 +249,7 @@ test("sendToPeer sends a directed binary message to only the selected peer", asy
         },
         destroy: () => {},
     });
-    sender.peers.set("other", {
+    registerOpenPeer(sender, "other", {
         connected: true,
         send: () => assert.fail("message was sent to an unintended peer"),
         destroy: () => {},
@@ -254,7 +261,7 @@ test("sendToPeer sends a directed binary message to only the selected peer", asy
     const recipient = createProvider("recipient");
     await recipient.ready;
     const peer = recipient.createPeer("sender", true);
-    recipient.peers.set("sender", peer);
+    registerOpenPeer(recipient, "sender", peer);
     const received = new Promise((resolve) => {
         recipient.on("direct-message", (peerId, payload) => resolve({ peerId, payload }));
     });
@@ -272,7 +279,7 @@ test("sendToPeer sends a directed binary message to only the selected peer", asy
 test("sendToPeer returns false for missing and disconnected peers", async () => {
     const provider = createProvider("sender");
     await provider.ready;
-    provider.peers.set("disconnected", {
+    registerOpenPeer(provider, "disconnected", {
         connected: false,
         send: () => {},
         destroy: () => {},

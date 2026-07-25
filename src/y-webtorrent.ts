@@ -7,6 +7,7 @@ import * as decoding from "lib0/decoding";
 import { ObservableV2 } from "lib0/observable";
 import { createInfoHash, createPeerId } from "./crypto.js";
 import { collectCandidateTypes } from "./sdp.js";
+import { type DataPeer, PeerRegistry, type PeerSlot } from "./peer.js";
 import {
     TrackerConnection,
     defaultTrackerUrls,
@@ -73,27 +74,6 @@ const messageSync = 0;
 const messageAwareness = 1;
 const messageQueryAwareness = 3;
 const messageDirect = 4;
-
-/**
- * The transport surface the provider actually depends on. `WebrtcDataPeer` satisfies this
- * structurally, so naming it costs nothing at runtime; it exists to keep provider logic
- * independent of the concrete transport and to state plainly how little of it is used.
- */
-export interface DataPeer {
-    readonly initiator: boolean;
-    readonly connected: boolean;
-    /**
-     * Narrowed to the one member the provider reads. The read is deliberately late — see
-     * `collectOffers`, which prefers the description as amended by ongoing ICE gathering
-     * over whatever `createOffer` resolved with.
-     */
-    readonly pc: { readonly localDescription: RTCSessionDescription | null };
-    createOffer(): Promise<TrackerSignal>;
-    acceptOffer(offer: TrackerSignal): Promise<TrackerSignal>;
-    acceptAnswer(answer: TrackerSignal): Promise<void>;
-    send(data: Uint8Array<ArrayBuffer>): boolean;
-    destroy(): void;
-}
 
 type PendingOffer = {
     peer: DataPeer;
@@ -208,14 +188,8 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     synced = false;
     infoHash: string | null = null;
     private trackerConnections: TrackerConnection[] = [];
-    private peers: Map<PeerId, DataPeer> = new Map();
+    private readonly registry = new PeerRegistry();
     private pendingOffers: Map<OfferId, PendingOffer> = new Map();
-    private readonly pendingPeerIds = new Map<PeerId, DataPeer>();
-    private readonly pendingPeers = new Set<DataPeer>();
-    private readonly pendingTimers = new Map<DataPeer, ReturnType<typeof setTimeout>>();
-    private readonly syncedPeers = new Set<DataPeer>();
-    private readonly peerIds = new WeakMap<DataPeer, PeerId | null>();
-    private readonly peerStartedAt = new WeakMap<DataPeer, number>();
     private readonly _WebSocket: typeof WebSocket | undefined;
     private readonly _RTCPeerConnection: typeof RTCPeerConnection | undefined;
     private readonly _ownsAwareness: boolean;
@@ -373,7 +347,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         generation: number = this.connectionGeneration,
     ): Promise<TrackerOffer[]> {
         if (!this.isCurrentGeneration(generation)) return [];
-        const capacity = Math.max(0, this.maxConns - this.peers.size - this.pendingPeers.size);
+        const capacity = Math.max(0, this.maxConns - this.registry.size);
         const count = Math.min(this.numwant, capacity);
         const records: OfferRecord[] = [];
         const offerPromises: Promise<void>[] = [];
@@ -390,7 +364,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                 negotiationFailed = true;
                 continue;
             }
-            this.pendingPeers.add(peer);
             const record: OfferRecord = {
                 offerId,
                 peer,
@@ -466,8 +439,8 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             tracker: tracker.url,
             candidateTypes: collectCandidateTypes([offer]),
         });
-        if (peerId === this.peerId || this.peers.has(peerId)) return;
-        const identifiedPending = this.pendingPeerIds.get(peerId);
+        if (peerId === this.peerId || this.registry.hasOpen(peerId)) return;
+        const identifiedPending = this.registry.pendingPeer(peerId);
         if (identifiedPending) {
             if (this.peerId > peerId && identifiedPending.initiator) {
                 this.cancelPendingPeer(identifiedPending);
@@ -479,7 +452,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         const competingOffer = this.pendingOffers.entries().next().value as
             | [OfferId, PendingOffer]
             | undefined;
-        const peerCount = this.peers.size + this.pendingPeers.size;
+        const peerCount = this.registry.size;
         if (peerCount >= this.maxConns) {
             if (!competingOffer || this.maxConns === 0) return;
             if (this.peerId > peerId) {
@@ -490,7 +463,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                 if (peerCount >= this.maxConns + 1) return;
             }
         }
-        if (this.peers.size + this.pendingPeers.size > this.maxConns) return;
+        if (this.registry.size > this.maxConns) return;
 
         let peer: DataPeer;
         try {
@@ -500,8 +473,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             this.requestRecoveryAnnounce();
             return;
         }
-        this.pendingPeers.add(peer);
-        this.pendingPeerIds.set(peerId, peer);
         this.startPeerTimeout(peer);
         try {
             const startedAt = Date.now();
@@ -514,7 +485,10 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                 answerElapsedMs: Date.now() - startedAt,
                 candidateTypes: collectCandidateTypes([answer]),
             });
-            if (!this.isCurrentGeneration(generation) || this.pendingPeerIds.get(peerId) !== peer) {
+            if (
+                !this.isCurrentGeneration(generation) ||
+                this.registry.pendingPeer(peerId) !== peer
+            ) {
                 this.cancelPendingPeer(peer);
                 return;
             }
@@ -530,7 +504,10 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                 return;
             }
         } catch (error) {
-            if (!this.isCurrentGeneration(generation) || this.pendingPeerIds.get(peerId) !== peer) {
+            if (
+                !this.isCurrentGeneration(generation) ||
+                this.registry.pendingPeer(peerId) !== peer
+            ) {
                 return;
             }
             this.emitSafely("peer-error", [error]);
@@ -556,11 +533,11 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         const pending = this.pendingOffers.get(offerId);
         if (!pending || peerId === this.peerId) return;
 
-        if (this.peers.has(peerId)) {
+        if (this.registry.hasOpen(peerId)) {
             this.cancelPendingPeer(pending.peer);
             return;
         }
-        const existingPending = this.pendingPeerIds.get(peerId);
+        const existingPending = this.registry.pendingPeer(peerId);
         if (existingPending) {
             if (this.peerId < peerId && !existingPending.initiator) {
                 this.cancelPendingPeer(existingPending);
@@ -570,29 +547,30 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             }
         }
 
-        if (this.peers.size >= this.maxConns) {
+        // Deliberately counts only open peers, unlike the inbound path in `receiveOffer`:
+        // this peer is already pending, so including pending would count it against itself.
+        if (this.registry.openCount >= this.maxConns) {
             this.cancelPendingPeer(pending.peer);
             return;
         }
 
         this.pendingOffers.delete(offerId);
-        this.peerIds.set(pending.peer, peerId);
-        this.pendingPeerIds.set(peerId, pending.peer);
+        this.registry.identify(pending.peer, peerId);
         try {
             await pending.peer.acceptAnswer(answer);
             if (!this.isCurrentGeneration(generation)) {
                 this.cancelPendingPeer(pending.peer);
                 return;
             }
-            if (this.peers.get(peerId) === pending.peer) return;
-            if (this.pendingPeerIds.get(peerId) !== pending.peer) {
+            if (this.registry.openPeer(peerId) === pending.peer) return;
+            if (this.registry.pendingPeer(peerId) !== pending.peer) {
                 this.cancelPendingPeer(pending.peer);
                 return;
             }
         } catch (error) {
             if (
                 !this.isCurrentGeneration(generation) ||
-                this.pendingPeerIds.get(peerId) !== pending.peer
+                this.registry.pendingPeer(peerId) !== pending.peer
             ) {
                 return;
             }
@@ -623,8 +601,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             },
             onDebug: (event) => this.emitDebug({ ...event, type: String(event["type"]) }),
         });
-        this.peerIds.set(peer, remotePeerId);
-        this.peerStartedAt.set(peer, Date.now());
+        this.registry.add(peer, remotePeerId, Date.now());
         this.emitDebug({
             type: "peer-created",
             initiator,
@@ -645,23 +622,23 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             this.cancelPendingPeer(peer);
             return;
         }
-        const peerId = this.peerIds.get(peer) ?? null;
+        const peerId = this.registry.peerIdOf(peer);
         if (!peerId) {
             this.cancelPendingPeer(peer);
             return;
         }
-        const existing = this.peers.get(peerId);
+        const existing = this.registry.openPeer(peerId);
         if (existing && existing !== peer) {
             this.cancelPendingPeer(peer);
             return;
         }
-        if (!existing && this.peers.size >= this.maxConns) {
+        if (!existing && this.registry.openCount >= this.maxConns) {
             this.cancelPendingPeer(peer);
             return;
         }
-        this.clearPendingPeer(peer);
-        this.peers.set(peerId, peer);
-        const startedAt = this.peerStartedAt.get(peer);
+        this.forgetPendingOffer(peer);
+        const startedAt = this.registry.get(peer)?.startedAt;
+        this.registry.promote(peer);
         this.emitDebug({
             type: "peer-connect",
             peerId,
@@ -671,7 +648,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             ...(startedAt === undefined ? {} : { connectElapsedMs: Date.now() - startedAt }),
         });
         if (!this.sendSyncStep1(peer) || !this.sendAwareness(peer)) return;
-        this.emitSafely("peers", [Array.from(this.peers.keys())]);
+        this.emitSafely("peers", [this.registry.openPeerIds]);
     }
 
     private onPeerMessage(
@@ -680,8 +657,8 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         generation: number = this.connectionGeneration,
     ): void {
         if (!this.isCurrentGeneration(generation)) return;
-        const peerId = this.peerIds.get(peer) ?? null;
-        if (!peerId || this.peers.get(peerId) !== peer || !peer.connected) return;
+        const peerId = this.registry.peerIdOf(peer);
+        if (!peerId || this.registry.openPeer(peerId) !== peer || !peer.connected) return;
         try {
             if (
                 readMessage(
@@ -694,8 +671,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                     (message) => this.emitSafely("direct-message", [peerId, message]),
                 )
             ) {
-                this.syncedPeers.add(peer);
-                this.updateSyncedState();
+                this.markSynced(peer);
             }
         } catch (error) {
             this.emitSafely("peer-error", [error]);
@@ -705,18 +681,11 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
 
     private removePeer(peer: DataPeer, generation: number = this.connectionGeneration): void {
         if (generation !== this.connectionGeneration) return;
-        this.syncedPeers.delete(peer);
+        const removed = this.clearPendingPeer(peer);
         this.updateSyncedState();
-        this.clearPendingPeer(peer);
-        let changed = false;
-        const peerId = this.peerIds.get(peer) ?? null;
-        if (peerId && this.peers.get(peerId) === peer) {
-            this.peers.delete(peerId);
-            changed = true;
-        }
-        if (changed) {
+        if (removed?.state === "open") {
             this.requestRecoveryAnnounce();
-            this.emitSafely("peers", [Array.from(this.peers.keys())]);
+            this.emitSafely("peers", [this.registry.openPeerIds]);
         }
     }
 
@@ -764,7 +733,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     sendToPeer(peerId: PeerId, message: Uint8Array<ArrayBuffer>): boolean {
-        const peer = this.peers.get(peerId);
+        const peer = this.registry.openPeer(peerId);
         if (!peer?.connected) return false;
 
         const encoder = encoding.createEncoder();
@@ -774,7 +743,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     private broadcast(message: Uint8Array<ArrayBuffer>): void {
-        for (const peer of this.peers.values()) {
+        for (const peer of this.registry.openPeers) {
             if (peer.connected) this.sendProtocolMessage(peer, message);
         }
     }
@@ -798,11 +767,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
     }
 
-    /**
-     * Builds the payload only when `debug` is enabled. Several diagnostics scan full SDP
-     * blobs, so an eagerly-built payload would cost real work on the signaling path in the
-     * default (`debug: false`) configuration.
-     */
     private emitDebug(event: DebugEvent): void {
         if (this.debug) this.emitSafely("debug", [event]);
     }
@@ -818,15 +782,11 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         const disconnectedTrackers = this.trackerConnections;
         for (const tracker of disconnectedTrackers) tracker.destroy();
         this.trackerConnections = [];
-        for (const peer of this.peers.values()) peer.destroy();
-        for (const peer of this.pendingPeers) peer.destroy();
-        this.peers.clear();
+        // The generation bump above makes the resulting `onClose` callbacks no-ops, so peers are
+        // destroyed for their side effects on the transport only; the registry is cleared here.
+        for (const peer of this.registry.allPeers) peer.destroy();
+        this.registry.clear();
         this.pendingOffers.clear();
-        this.pendingPeerIds.clear();
-        this.pendingPeers.clear();
-        for (const timer of this.pendingTimers.values()) clearTimeout(timer);
-        this.pendingTimers.clear();
-        this.syncedPeers.clear();
         if (this.synced) {
             this.synced = false;
             this.emitSafely("synced", [false]);
@@ -855,13 +815,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     private requestRecoveryAnnounce(): void {
-        if (
-            this.destroyed ||
-            !this.shouldConnect ||
-            this.peers.size + this.pendingPeers.size >= this.maxConns
-        ) {
-            return;
-        }
+        if (this.destroyed || !this.shouldConnect || this.registry.size >= this.maxConns) return;
         for (const tracker of this.trackerConnections) tracker.requestRecoveryAnnounce();
     }
 
@@ -870,12 +824,18 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         peer.destroy();
     }
 
-    private clearPendingPeer(peer: DataPeer): void {
-        this.pendingPeers.delete(peer);
-        this.clearPeerTimeout(peer);
-        for (const [peerId, pending] of this.pendingPeerIds) {
-            if (pending === peer) this.pendingPeerIds.delete(peerId);
-        }
+    /** Forgets a peer entirely. Returns its final slot so callers can see whether it was open. */
+    private clearPendingPeer(peer: DataPeer): PeerSlot | undefined {
+        this.forgetPendingOffer(peer);
+        return this.registry.remove(peer);
+    }
+
+    /**
+     * Drops any announced offer record naming this peer, so a late answer cannot revive it and
+     * no tracker re-announces it. Offer records stay with the provider rather than the registry
+     * because retiring one also has to reach the tracker connections.
+     */
+    private forgetPendingOffer(peer: DataPeer): void {
         for (const [offerId, pending] of this.pendingOffers) {
             if (pending.peer !== peer) continue;
             pending.canceled = true;
@@ -885,24 +845,25 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     private startPeerTimeout(peer: DataPeer): void {
-        this.clearPeerTimeout(peer);
-        this.pendingTimers.set(
+        this.registry.setTimer(
             peer,
             setTimeout(() => {
-                this.pendingTimers.delete(peer);
+                this.registry.clearTimer(peer);
                 this.cancelPendingPeer(peer);
                 this.requestRecoveryAnnounce();
             }, this.signalTimeout),
         );
     }
 
-    private clearPeerTimeout(peer: DataPeer): void {
-        clearTimeout(this.pendingTimers.get(peer));
-        this.pendingTimers.delete(peer);
+    private markSynced(peer: DataPeer): void {
+        const slot = this.registry.get(peer);
+        if (!slot) return;
+        slot.synced = true;
+        this.updateSyncedState();
     }
 
     private updateSyncedState(): void {
-        const synced = this.syncedPeers.size > 0;
+        const synced = this.registry.hasSynced;
         if (synced === this.synced) return;
         this.synced = synced;
         this.emitSafely("synced", [synced]);
