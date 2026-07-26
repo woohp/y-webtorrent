@@ -260,8 +260,9 @@ test("sendToPeer sends a directed binary message to only the selected peer", asy
 
     const recipient = createProvider("recipient");
     await recipient.ready;
+    // `createPeer` already registered this one; it only needs promoting.
     const peer = recipient.createPeer("sender", true);
-    registerOpenPeer(recipient, "sender", peer);
+    recipient.registry.promote(peer);
     const received = new Promise((resolve) => {
         recipient.on("direct-message", (peerId, payload) => resolve({ peerId, payload }));
     });

@@ -49,6 +49,11 @@ export interface PeerSlot {
  *
  * Peer lifecycle stays with the provider: this class never calls `destroy` on a transport,
  * it only forgets it.
+ *
+ * Registering a peer twice throws; every other mutator is a no-op on an unregistered peer.
+ * That asymmetry is deliberate. A transport's callbacks can outlive the slot — a generation
+ * bump during `disconnect` forgets peers whose channels then open anyway — so the mutators
+ * have to tolerate arriving late. Nothing legitimately registers the same peer twice.
  */
 export class PeerRegistry {
     private readonly slots = new Map<DataPeer, PeerSlot>();
@@ -110,8 +115,16 @@ export class PeerRegistry {
         return this.pendingByPeerId.get(peerId);
     }
 
-    /** Registers a newly created transport as pending. `peerId` is null for outbound offers. */
+    /**
+     * Registers a newly created transport as pending. `peerId` is null for outbound offers.
+     *
+     * Throws on re-registration rather than replacing the slot. Overwriting silently would
+     * orphan the old slot's timer and leave its id indexed, and the symptom surfaces far from
+     * the second `add` — during this registry's own rollout a double-registered test peer
+     * reverted to `peerId: null` and simply stopped being findable.
+     */
     add(peer: DataPeer, peerId: PeerId | null, startedAt: number): PeerSlot {
+        if (this.slots.has(peer)) throw new Error("peer is already registered");
         const slot: PeerSlot = {
             peer,
             peerId,

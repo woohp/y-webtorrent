@@ -681,7 +681,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
 
     private removePeer(peer: DataPeer, generation: number = this.connectionGeneration): void {
         if (generation !== this.connectionGeneration) return;
-        const removed = this.clearPendingPeer(peer);
+        const removed = this.forgetPeer(peer);
         this.updateSyncedState();
         if (removed?.state === "open") {
             this.requestRecoveryAnnounce();
@@ -820,12 +820,12 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     private cancelPendingPeer(peer: DataPeer): void {
-        this.clearPendingPeer(peer);
+        this.forgetPeer(peer);
         peer.destroy();
     }
 
-    /** Forgets a peer entirely. Returns its final slot so callers can see whether it was open. */
-    private clearPendingPeer(peer: DataPeer): PeerSlot | undefined {
+    /** Returns the peer's final slot, so callers can see whether it had been open. */
+    private forgetPeer(peer: DataPeer): PeerSlot | undefined {
         this.forgetPendingOffer(peer);
         return this.registry.remove(peer);
     }
