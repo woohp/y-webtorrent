@@ -58,6 +58,21 @@ export interface TrackerConnectionOptions {
     WebSocket?: typeof WebSocket;
 }
 
+type AnnounceInFlight = {
+    promise: Promise<boolean>;
+    trailing: boolean;
+};
+
+type TrackerSession = {
+    socket: WebSocket;
+    offerIds: Set<OfferId>;
+    announceInFlight: AnnounceInFlight | null;
+    connectTimer?: ReturnType<typeof setTimeout>;
+    announceTimer?: ReturnType<typeof setTimeout>;
+    announceResponseTimer?: ReturnType<typeof setTimeout>;
+    recoveryAnnounceTimer?: ReturnType<typeof setTimeout>;
+};
+
 /** @internal Tracker signaling implementation; not exported from the package entry point. */
 export class TrackerConnection {
     readonly url: string;
@@ -76,21 +91,9 @@ export class TrackerConnection {
     readonly announceResponseTimeout: number;
     destroyed = false;
     reconnectDelay = 1000;
-    socket: WebSocket | null = null;
-    announceTimer: ReturnType<typeof setTimeout> | undefined;
     reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    connectTimer: ReturnType<typeof setTimeout> | undefined;
-    announceResponseTimer: ReturnType<typeof setTimeout> | undefined;
-    private recoveryAnnounceTimer: ReturnType<typeof setTimeout> | undefined;
-    private recoveryAnnounceSocket: WebSocket | null = null;
+    private session: TrackerSession | null = null;
     private lastAnnounceAt = 0;
-    private announceInFlight: {
-        socket: WebSocket;
-        promise: Promise<boolean>;
-        trailing: boolean;
-    } | null = null;
-    private announceResponseSocket: WebSocket | null = null;
-    private readonly announcedOffers = new Map<WebSocket, Set<OfferId>>();
 
     constructor(url: string, opts: TrackerConnectionOptions) {
         const parsedUrl = new URL(url);
@@ -117,30 +120,30 @@ export class TrackerConnection {
         this.connect();
     }
 
+    private get socket(): WebSocket | null {
+        return this.session?.socket ?? null;
+    }
+
     connect(): void {
         if (this.destroyed || !this.WebSocket) return;
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
-        if (this.socket) {
-            if (this.socket.readyState === 0 || this.socket.readyState === this.WebSocket.OPEN)
+
+        const existing = this.session;
+        if (existing) {
+            if (
+                existing.socket.readyState === 0 ||
+                existing.socket.readyState === this.WebSocket.OPEN
+            ) {
                 return;
-            const staleSocket = this.socket;
-            this.socket = null;
-            try {
-                staleSocket.close();
-            } catch {
-                this.cancelSocketOffers(staleSocket);
             }
+            this.closeSession(existing);
         }
-        clearTimeout(this.connectTimer);
-        this.connectTimer = undefined;
 
         let socket: WebSocket;
         try {
             socket = new this.WebSocket(this.url);
-            this.socket = socket;
         } catch (error) {
-            this.socket = null;
             this.scheduleReconnect();
             try {
                 this.onError(error);
@@ -150,21 +153,22 @@ export class TrackerConnection {
             return;
         }
 
-        this.connectTimer = setTimeout(() => {
+        const session: TrackerSession = {
+            socket,
+            offerIds: new Set(),
+            announceInFlight: null,
+        };
+        this.session = session;
+        session.connectTimer = setTimeout(() => {
             if (
-                socket !== this.socket ||
+                session !== this.session ||
                 this.destroyed ||
                 socket.readyState === this.WebSocket!.OPEN
             ) {
                 return;
             }
-            this.socket = null;
-            this.connectTimer = undefined;
-            try {
-                socket.close();
-            } catch {
-                // Reconnection is still required if closing the stale socket fails.
-            }
+            delete session.connectTimer;
+            this.closeSession(session);
             this.scheduleReconnect();
             try {
                 this.onError(new Error(`WebSocket connection timed out: ${this.url}`));
@@ -174,28 +178,26 @@ export class TrackerConnection {
         }, this.connectTimeout);
 
         socket.addEventListener("open", () => {
-            if (socket !== this.socket || this.destroyed) return;
-            clearTimeout(this.connectTimer);
-            this.connectTimer = undefined;
+            if (session !== this.session || this.destroyed) return;
+            clearTimeout(session.connectTimer);
+            delete session.connectTimer;
             this.reportState("connected");
-            void this.announce("started", socket).catch((error: unknown) => this.onError(error));
+            void this.announce("started", session).catch((error: unknown) => this.onError(error));
         });
         socket.addEventListener("message", (event) => {
-            if (socket !== this.socket) return;
+            if (session !== this.session) return;
             void this.handleMessage(event.data, socket).catch((error: unknown) => {
-                if (socket === this.socket && !this.destroyed) this.onError(error);
+                if (session === this.session && !this.destroyed) this.onError(error);
             });
         });
         socket.addEventListener("error", (event) => {
-            if (socket === this.socket && !this.destroyed) this.onError(event);
+            if (session === this.session && !this.destroyed) this.onError(event);
         });
         socket.addEventListener("close", () => {
-            this.cancelSocketOffers(socket);
-            this.clearAnnounceResponseTimeout(socket);
-            this.clearRecoveryAnnounceTimer(socket);
-            if (socket !== this.socket || this.destroyed) return;
-            clearTimeout(this.connectTimer);
-            this.connectTimer = undefined;
+            const wasCurrent = session === this.session;
+            if (wasCurrent) this.session = null;
+            this.clearSession(session);
+            if (!wasCurrent || this.destroyed) return;
             this.scheduleReconnect();
             this.reportState("reconnecting");
         });
@@ -203,22 +205,22 @@ export class TrackerConnection {
 
     private announce(
         event?: "started" | "stopped" | "completed",
-        socket: WebSocket | null = this.socket,
+        session: TrackerSession | null = this.session,
     ): Promise<boolean> {
-        if (!socket || socket !== this.socket || !this.isOpen()) return Promise.resolve(false);
-        const active = this.announceInFlight;
-        if (active?.socket === socket) {
+        if (!session || !this.isSessionOpen(session)) return Promise.resolve(false);
+        const active = session.announceInFlight;
+        if (active) {
             if (event !== "stopped") active.trailing = true;
             return active.promise;
         }
 
-        const promise = this.performAnnounce(event, socket);
-        const state = { socket, promise, trailing: false };
-        this.announceInFlight = state;
+        const promise = this.performAnnounce(event, session);
+        const state: AnnounceInFlight = { promise, trailing: false };
+        session.announceInFlight = state;
         const finish = (): void => {
-            if (this.announceInFlight !== state) return;
-            this.announceInFlight = null;
-            if (state.trailing && socket === this.socket && !this.destroyed) {
+            if (session.announceInFlight !== state) return;
+            session.announceInFlight = null;
+            if (state.trailing && session === this.session && !this.destroyed) {
                 this.requestRecoveryAnnounce();
             }
         };
@@ -228,10 +230,10 @@ export class TrackerConnection {
 
     private async performAnnounce(
         event: "started" | "stopped" | "completed" | undefined,
-        socket: WebSocket,
+        session: TrackerSession,
     ): Promise<boolean> {
-        if (socket !== this.socket || !this.isOpen()) return false;
-        this.clearRecoveryAnnounceTimer(socket);
+        if (!this.isSessionOpen(session)) return false;
+        this.clearRecoveryAnnounceTimer(session);
 
         const message: TrackerAnnounceMessage = {
             action: "announce",
@@ -243,18 +245,18 @@ export class TrackerConnection {
         let offers: TrackerOffer[] = [];
         if (event !== "stopped") {
             offers = await this.createOffers(this);
-            if (socket !== this.socket || this.destroyed || !this.isOpen()) {
+            if (!this.isSessionOpen(session) || this.destroyed) {
                 this.cancelOfferBatch(offers);
                 return false;
             }
             if (offers.length > 0) message.offers = offers;
         }
         try {
-            const sent = this.send(message);
+            const sent = this.send(message, session);
             if (sent) {
                 this.lastAnnounceAt = Date.now();
-                this.trackOfferBatch(socket, offers);
-                if (event !== "stopped") this.startAnnounceResponseTimeout(socket);
+                this.trackOfferBatch(session, offers);
+                if (event !== "stopped") this.startAnnounceResponseTimeout(session);
             } else {
                 this.cancelOfferBatch(offers);
             }
@@ -265,61 +267,41 @@ export class TrackerConnection {
         }
     }
 
-    private startAnnounceResponseTimeout(socket: WebSocket): void {
-        this.clearAnnounceResponseTimeout();
-        this.announceResponseSocket = socket;
-        this.announceResponseTimer = setTimeout(() => {
-            if (
-                this.destroyed ||
-                socket !== this.socket ||
-                socket !== this.announceResponseSocket
-            ) {
-                if (socket === this.announceResponseSocket) {
-                    this.announceResponseTimer = undefined;
-                    this.announceResponseSocket = null;
-                }
-                return;
-            }
-            this.announceResponseTimer = undefined;
-            this.announceResponseSocket = null;
+    private startAnnounceResponseTimeout(session: TrackerSession): void {
+        this.clearAnnounceResponseTimeout(session);
+        session.announceResponseTimer = setTimeout(() => {
+            delete session.announceResponseTimer;
+            if (this.destroyed || session !== this.session) return;
             try {
                 this.onError(new Error(`Tracker announce response timed out: ${this.url}`));
             } finally {
-                socket.close();
+                session.socket.close();
             }
         }, this.announceResponseTimeout);
     }
 
-    private clearAnnounceResponseTimeout(socket?: WebSocket): void {
-        if (socket && socket !== this.announceResponseSocket) return;
-        clearTimeout(this.announceResponseTimer);
-        this.announceResponseTimer = undefined;
-        this.announceResponseSocket = null;
+    private clearAnnounceResponseTimeout(session: TrackerSession): void {
+        clearTimeout(session.announceResponseTimer);
+        delete session.announceResponseTimer;
     }
 
-    private trackOfferBatch(socket: WebSocket, offers: readonly TrackerOffer[]): void {
-        if (offers.length === 0) return;
-        const offerIds = this.announcedOffers.get(socket) ?? new Set<OfferId>();
-        for (const offer of offers) offerIds.add(offer.offer_id);
-        this.announcedOffers.set(socket, offerIds);
+    private trackOfferBatch(session: TrackerSession, offers: readonly TrackerOffer[]): void {
+        for (const offer of offers) session.offerIds.add(offer.offer_id);
     }
 
     private cancelOfferBatch(offers: readonly TrackerOffer[]): void {
         if (offers.length > 0) this.cancelOffers(offers.map((offer) => offer.offer_id));
     }
 
-    private cancelSocketOffers(socket: WebSocket): void {
-        const offerIds = this.announcedOffers.get(socket);
-        if (!offerIds) return;
-        this.announcedOffers.delete(socket);
-        this.cancelOffers([...offerIds]);
+    private cancelSessionOffers(session: TrackerSession): void {
+        if (session.offerIds.size === 0) return;
+        const offerIds = [...session.offerIds];
+        session.offerIds.clear();
+        this.cancelOffers(offerIds);
     }
 
     forgetOffer(offerId: OfferId): void {
-        for (const [socket, offerIds] of this.announcedOffers) {
-            offerIds.delete(offerId);
-            if (offerIds.size === 0) this.announcedOffers.delete(socket);
-        }
+        this.session?.offerIds.delete(offerId);
     }
 
     sendAnswer(toPeerId: PeerId, offerId: OfferId, answer: TrackerSignal): boolean {
@@ -337,7 +319,8 @@ export class TrackerConnection {
         data: string | Blob | ArrayBufferLike,
         socket: WebSocket | null = this.socket,
     ): Promise<void> {
-        if (!socket || socket !== this.socket || this.destroyed) return;
+        const session = this.session;
+        if (!socket || !session || session.socket !== socket || this.destroyed) return;
         let message: TrackerAnnounceMessage;
         try {
             const text =
@@ -346,7 +329,7 @@ export class TrackerConnection {
                     : data instanceof Blob
                       ? await data.text()
                       : new TextDecoder().decode(data as AllowSharedBufferSource);
-            if (socket !== this.socket || this.destroyed) return;
+            if (session !== this.session || this.destroyed) return;
             message = JSON.parse(text) as TrackerAnnounceMessage;
         } catch (error) {
             this.onError(error);
@@ -357,7 +340,7 @@ export class TrackerConnection {
 
         const failure = message["failure reason"];
         if (typeof failure === "string") {
-            this.clearAnnounceResponseTimeout(socket);
+            this.clearAnnounceResponseTimeout(session);
             try {
                 this.onError(new Error(`Tracker failure: ${failure}`));
             } finally {
@@ -367,13 +350,13 @@ export class TrackerConnection {
         }
         if (message.info_hash !== this.infoHash) return;
 
-        this.clearAnnounceResponseTimeout(socket);
+        this.clearAnnounceResponseTimeout(session);
         this.reconnectDelay = 1000;
         const hasAnnounceMetadata =
             message.interval !== undefined || "complete" in message || "incomplete" in message;
         if (hasAnnounceMetadata) {
             this.scheduleAnnounce(message.interval);
-        } else if (!this.announceTimer) {
+        } else if (!session.announceTimer) {
             this.scheduleAnnounce(undefined);
         }
         const warning = message["warning message"];
@@ -388,6 +371,8 @@ export class TrackerConnection {
     }
 
     scheduleAnnounce(intervalSeconds: unknown): void {
+        const session = this.session;
+        if (!session) return;
         const requestedSeconds =
             typeof intervalSeconds === "number" &&
             Number.isFinite(intervalSeconds) &&
@@ -399,62 +384,64 @@ export class TrackerConnection {
             requestedDelay <= maximumTimerDelay
                 ? requestedDelay
                 : fallbackAnnounceIntervalSeconds * 1000 * (1 + Math.random() * 0.1);
-        this.clearAnnounceTimer();
-        this.announceTimer = setTimeout(() => {
-            this.announceTimer = undefined;
-            void this.announce().catch((error: unknown) => this.onError(error));
-        }, delay);
-    }
-
-    requestRecoveryAnnounce(): void {
-        if (this.destroyed || !this.isOpen()) return;
-        const socket = this.socket;
-        if (this.announceInFlight?.socket === socket) {
-            this.announceInFlight.trailing = true;
-            return;
-        }
-        if (this.recoveryAnnounceTimer) return;
-        const delay =
-            Math.max(0, this.lastAnnounceAt + minimumRecoveryAnnounceDelay - Date.now()) +
-            Math.random() * recoveryAnnounceJitter;
-        this.recoveryAnnounceSocket = socket;
-        this.recoveryAnnounceTimer = setTimeout(() => {
-            this.recoveryAnnounceTimer = undefined;
-            this.recoveryAnnounceSocket = null;
-            if (!this.destroyed && socket === this.socket && this.isOpen()) {
-                void this.announce().catch((error: unknown) => this.onError(error));
+        this.clearAnnounceTimer(session);
+        session.announceTimer = setTimeout(() => {
+            delete session.announceTimer;
+            if (session === this.session) {
+                void this.announce(undefined, session).catch((error: unknown) =>
+                    this.onError(error),
+                );
             }
         }, delay);
     }
 
-    private clearAnnounceTimer(): void {
-        clearTimeout(this.announceTimer);
-        this.announceTimer = undefined;
+    requestRecoveryAnnounce(): void {
+        const session = this.session;
+        if (this.destroyed || !session || !this.isSessionOpen(session)) return;
+        if (session.announceInFlight) {
+            session.announceInFlight.trailing = true;
+            return;
+        }
+        if (session.recoveryAnnounceTimer) return;
+        const delay =
+            Math.max(0, this.lastAnnounceAt + minimumRecoveryAnnounceDelay - Date.now()) +
+            Math.random() * recoveryAnnounceJitter;
+        session.recoveryAnnounceTimer = setTimeout(() => {
+            delete session.recoveryAnnounceTimer;
+            if (!this.destroyed && this.isSessionOpen(session)) {
+                void this.announce(undefined, session).catch((error: unknown) =>
+                    this.onError(error),
+                );
+            }
+        }, delay);
     }
 
-    private clearRecoveryAnnounceTimer(socket?: WebSocket): void {
-        if (socket && socket !== this.recoveryAnnounceSocket) return;
-        clearTimeout(this.recoveryAnnounceTimer);
-        this.recoveryAnnounceTimer = undefined;
-        this.recoveryAnnounceSocket = null;
+    private clearAnnounceTimer(session: TrackerSession): void {
+        clearTimeout(session.announceTimer);
+        delete session.announceTimer;
+    }
+
+    private clearRecoveryAnnounceTimer(session: TrackerSession): void {
+        clearTimeout(session.recoveryAnnounceTimer);
+        delete session.recoveryAnnounceTimer;
     }
 
     scheduleReconnect(): void {
-        this.clearAnnounceTimer();
+        if (this.session) this.clearAnnounceTimer(this.session);
         if (this.destroyed) return;
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
     }
 
-    send(message: TrackerAnnounceMessage): boolean {
-        if (!this.isOpen()) return false;
+    send(message: TrackerAnnounceMessage, session: TrackerSession | null = this.session): boolean {
+        if (!session || !this.isSessionOpen(session)) return false;
         try {
-            this.socket.send(JSON.stringify(message));
+            session.socket.send(JSON.stringify(message));
             return true;
         } catch (error) {
             this.onError(error);
-            this.socket?.close();
+            session.socket.close();
             return false;
         }
     }
@@ -467,39 +454,63 @@ export class TrackerConnection {
         }
     }
 
-    isOpen(): this is this & { socket: WebSocket; WebSocket: typeof WebSocket } {
-        return !!this.socket && !!this.WebSocket && this.socket.readyState === this.WebSocket.OPEN;
+    isOpen(): boolean {
+        return !!this.session && this.isSessionOpen(this.session);
     }
 
     destroy(): void {
         if (this.destroyed) return;
         this.destroyed = true;
-        this.clearAnnounceTimer();
-        this.clearRecoveryAnnounceTimer();
         clearTimeout(this.reconnectTimer);
-        clearTimeout(this.connectTimer);
-        this.connectTimer = undefined;
-        this.clearAnnounceResponseTimeout();
-        if (this.isOpen()) {
+        this.reconnectTimer = undefined;
+        const session = this.session;
+        if (session && this.isSessionOpen(session)) {
             try {
-                this.send({
-                    action: "announce",
-                    event: "stopped",
-                    info_hash: this.infoHash,
-                    peer_id: this.peerId,
-                });
+                this.send(
+                    {
+                        action: "announce",
+                        event: "stopped",
+                        info_hash: this.infoHash,
+                        peer_id: this.peerId,
+                    },
+                    session,
+                );
             } catch {
                 // Final cleanup must continue if diagnostics from the stopped announce fail.
             }
         }
-        for (const socket of this.announcedOffers.keys()) this.cancelSocketOffers(socket);
-        try {
-            this.socket?.close();
-        } catch {
-            // The wrapper is still terminal if the injected socket throws while closing.
-        }
-        this.socket = null;
+        if (session) this.closeSession(session);
         this.reportState("disconnected");
+    }
+
+    private isSessionOpen(session: TrackerSession): boolean {
+        return (
+            session === this.session &&
+            !!this.WebSocket &&
+            session.socket.readyState === this.WebSocket.OPEN
+        );
+    }
+
+    private closeSession(session: TrackerSession): void {
+        if (session === this.session) this.session = null;
+        this.clearSession(session);
+        try {
+            session.socket.close();
+        } catch {
+            // The tracker can continue or terminate even if an injected socket throws while closing.
+        }
+    }
+
+    private clearSession(session: TrackerSession): void {
+        // Cancel timers that have not fired; session identity checks still neutralize callbacks
+        // already queued when teardown began.
+        clearTimeout(session.connectTimer);
+        delete session.connectTimer;
+        this.clearAnnounceTimer(session);
+        this.clearAnnounceResponseTimeout(session);
+        this.clearRecoveryAnnounceTimer(session);
+        session.announceInFlight = null;
+        this.cancelSessionOffers(session);
     }
 }
 

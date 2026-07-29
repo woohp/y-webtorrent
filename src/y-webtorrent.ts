@@ -343,9 +343,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
     }
 
-    private async createOffers(
-        generation: number = this.connectionGeneration,
-    ): Promise<TrackerOffer[]> {
+    private async createOffers(generation: number): Promise<TrackerOffer[]> {
         if (!this.isCurrentGeneration(generation)) return [];
         const capacity = Math.max(0, this.maxConns - this.registry.size);
         const count = Math.min(this.numwant, capacity);
@@ -429,7 +427,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         offerId: OfferId,
         offer: TrackerSignal,
         tracker: TrackerConnection,
-        generation: number = this.connectionGeneration,
+        generation: number,
     ): Promise<void> {
         if (!this.isCurrentGeneration(generation)) return;
         this.emitDebug({
@@ -520,7 +518,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         peerId: PeerId,
         offerId: OfferId,
         answer: TrackerSignal,
-        generation: number = this.connectionGeneration,
+        generation: number,
     ): Promise<void> {
         if (!this.isCurrentGeneration(generation)) return;
         this.emitDebug({
@@ -583,7 +581,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     private createPeer(
         remotePeerId: PeerId | null,
         initiator: boolean,
-        generation: number = this.connectionGeneration,
+        generation: number,
     ): DataPeer {
         const peer = new WebrtcDataPeer({
             initiator,
@@ -613,11 +611,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         return peer;
     }
 
-    private onPeerOpen(
-        peer: DataPeer,
-        initiator: boolean,
-        generation: number = this.connectionGeneration,
-    ): void {
+    private onPeerOpen(peer: DataPeer, initiator: boolean, generation: number): void {
         if (!this.isCurrentGeneration(generation)) {
             this.cancelPendingPeer(peer);
             return;
@@ -651,11 +645,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         this.emitSafely("peers", [this.registry.openPeerIds]);
     }
 
-    private onPeerMessage(
-        peer: DataPeer,
-        data: ArrayBuffer,
-        generation: number = this.connectionGeneration,
-    ): void {
+    private onPeerMessage(peer: DataPeer, data: ArrayBuffer, generation: number): void {
         if (!this.isCurrentGeneration(generation)) return;
         const peerId = this.registry.peerIdOf(peer);
         if (!peerId || this.registry.openPeer(peerId) !== peer || !peer.connected) return;
@@ -679,7 +669,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
     }
 
-    private removePeer(peer: DataPeer, generation: number = this.connectionGeneration): void {
+    private removePeer(peer: DataPeer, generation: number): void {
         if (generation !== this.connectionGeneration) return;
         const removed = this.forgetPeer(peer);
         this.updateSyncedState();

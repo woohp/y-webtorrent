@@ -207,7 +207,7 @@ test("debug output recognizes an injected WebRTC constructor", () => {
         });
         const events = [];
         provider.on("debug", (event) => events.push(event));
-        const peer = provider.createPeer("remote", true);
+        const peer = provider.createPeer("remote", true, provider.connectionGeneration);
 
         assert.equal(
             events.find((event) => event.type === "peer-created").hasRtcPeerConnection,
@@ -228,7 +228,7 @@ test("normalizes transport debug event types", () => {
     });
     const events = [];
     provider.on("debug", (event) => events.push(event));
-    const peer = provider.createPeer("remote", true);
+    const peer = provider.createPeer("remote", true, provider.connectionGeneration);
 
     peer.onDebug({ type: 42, detail: "preserved" });
 
@@ -261,7 +261,7 @@ test("sendToPeer sends a directed binary message to only the selected peer", asy
     const recipient = createProvider("recipient");
     await recipient.ready;
     // `createPeer` already registered this one; it only needs promoting.
-    const peer = recipient.createPeer("sender", true);
+    const peer = recipient.createPeer("sender", true, recipient.connectionGeneration);
     recipient.registry.promote(peer);
     const received = new Promise((resolve) => {
         recipient.on("direct-message", (peerId, payload) => resolve({ peerId, payload }));

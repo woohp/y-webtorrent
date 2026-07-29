@@ -59,7 +59,7 @@ const registerPeer = (provider, peer, peerId = null, { open = false } = {}) => {
 
 const installSignalingPeers = (provider, createOffer) => {
     const created = [];
-    provider.createPeer = (remotePeerId, initiator, generation = provider.connectionGeneration) => {
+    provider.createPeer = (remotePeerId, initiator, generation) => {
         const id = `${provider.peerId}-${created.length}`;
         const localDescription = { type: "offer", sdp: id };
         let destroyed = false;
@@ -110,25 +110,25 @@ const connectProviders = (first, second) => {
     const firstPeer = {
         connected: true,
         send: (message) => {
-            second.onPeerMessage(secondPeer, copyBuffer(message));
+            second.onPeerMessage(secondPeer, copyBuffer(message), second.connectionGeneration);
             return true;
         },
         destroy: () => {
             if (firstDestroyed) return;
             firstDestroyed = true;
-            first.removePeer(firstPeer);
+            first.removePeer(firstPeer, first.connectionGeneration);
         },
     };
     const secondPeer = {
         connected: true,
         send: (message) => {
-            first.onPeerMessage(firstPeer, copyBuffer(message));
+            first.onPeerMessage(firstPeer, copyBuffer(message), first.connectionGeneration);
             return true;
         },
         destroy: () => {
             if (secondDestroyed) return;
             secondDestroyed = true;
-            second.removePeer(secondPeer);
+            second.removePeer(secondPeer, second.connectionGeneration);
         },
     };
     // Both sides must be open before either handshake starts: `onPeerOpen` sends Sync Step 1
@@ -136,8 +136,8 @@ const connectProviders = (first, second) => {
     // consider open. Promoting one at a time would sync only one direction.
     registerPeer(first, firstPeer, second.peerId, { open: true });
     registerPeer(second, secondPeer, first.peerId, { open: true });
-    first.onPeerOpen(firstPeer, true);
-    second.onPeerOpen(secondPeer, false);
+    first.onPeerOpen(firstPeer, true, first.connectionGeneration);
+    second.onPeerOpen(secondPeer, false, second.connectionGeneration);
     return { firstPeer, secondPeer };
 };
 
@@ -154,9 +154,9 @@ test("syncs documents and waits for Sync Step 2 before setting synced", async ()
         destroy: () => {},
     };
     registerPeer(first, unopenedPeer, "unopened");
-    first.onPeerOpen(unopenedPeer, true);
+    first.onPeerOpen(unopenedPeer, true, first.connectionGeneration);
     assert.equal(first.synced, false);
-    first.removePeer(unopenedPeer);
+    first.removePeer(unopenedPeer, first.connectionGeneration);
 
     const { firstPeer, secondPeer } = connectProviders(first, second);
 
@@ -187,7 +187,7 @@ test("protocol send failure and malformed frames destroy the affected peer", asy
     };
     registerPeer(provider, sendFailurePeer, "send-failure");
 
-    provider.onPeerOpen(sendFailurePeer, true);
+    provider.onPeerOpen(sendFailurePeer, true, provider.connectionGeneration);
     assert.equal(sendFailureDestroyed, 1);
 
     let malformedDestroyed = 0;
@@ -202,7 +202,11 @@ test("protocol send failure and malformed frames destroy the affected peer", asy
     provider.on("peer-error", () => {
         throw new Error("peer-error listener failed");
     });
-    provider.onPeerMessage(malformedPeer, new Uint8Array([255]).buffer);
+    provider.onPeerMessage(
+        malformedPeer,
+        new Uint8Array([255]).buffer,
+        provider.connectionGeneration,
+    );
     assert.equal(malformedDestroyed, 1);
     provider.destroy();
 });
@@ -243,8 +247,8 @@ for (const order of ["lower-first", "higher-first"]) {
         const lowerTracker = createFakeTracker();
         const higherTracker = createFakeTracker();
         const [lowerOffers, higherOffers] = await Promise.all([
-            lower.createOffers(),
-            higher.createOffers(),
+            lower.createOffers(lower.connectionGeneration),
+            higher.createOffers(higher.connectionGeneration),
         ]);
         const deliverLowerOffer = () =>
             higher.receiveOffer(
@@ -252,6 +256,7 @@ for (const order of ["lower-first", "higher-first"]) {
                 lowerOffers[0].offer_id,
                 lowerOffers[0].offer,
                 higherTracker,
+                higher.connectionGeneration,
             );
         const deliverHigherOffer = () =>
             lower.receiveOffer(
@@ -259,6 +264,7 @@ for (const order of ["lower-first", "higher-first"]) {
                 higherOffers[0].offer_id,
                 higherOffers[0].offer,
                 lowerTracker,
+                lower.connectionGeneration,
             );
 
         if (order === "lower-first") {
@@ -275,9 +281,15 @@ for (const order of ["lower-first", "higher-first"]) {
             lower.peerId,
             answerForCanceledOffer.offerId,
             answerForCanceledOffer.answer,
+            higher.connectionGeneration,
         );
         const routedAnswer = higherTracker.answers[0];
-        await lower.receiveAnswer(higher.peerId, routedAnswer.offerId, routedAnswer.answer);
+        await lower.receiveAnswer(
+            higher.peerId,
+            routedAnswer.offerId,
+            routedAnswer.answer,
+            lower.connectionGeneration,
+        );
 
         const lowerPeer = lower.registry.pendingPeer(higher.peerId);
         const higherPeer = higher.registry.pendingPeer(lower.peerId);
@@ -286,19 +298,19 @@ for (const order of ["lower-first", "higher-first"]) {
         lowerPeer.connected = true;
         higherPeer.connected = true;
         lowerPeer.send = (message) => {
-            higher.onPeerMessage(higherPeer, copyBuffer(message));
+            higher.onPeerMessage(higherPeer, copyBuffer(message), higher.connectionGeneration);
             return true;
         };
         higherPeer.send = (message) => {
-            lower.onPeerMessage(lowerPeer, copyBuffer(message));
+            lower.onPeerMessage(lowerPeer, copyBuffer(message), lower.connectionGeneration);
             return true;
         };
         lower.doc.getText("shared").insert(0, "lower");
         // Open both before either handshake, as in `connectProviders`.
         lower.registry.promote(lowerPeer);
         higher.registry.promote(higherPeer);
-        lower.onPeerOpen(lowerPeer, true);
-        higher.onPeerOpen(higherPeer, false);
+        lower.onPeerOpen(lowerPeer, true, lower.connectionGeneration);
+        higher.onPeerOpen(higherPeer, false, higher.connectionGeneration);
 
         assert.equal(higher.doc.getText("shared").toString(), "lower");
         assert.equal(lower.synced, true);
@@ -317,11 +329,16 @@ for (const [localId, remoteId, keepsOutbound] of [
         await provider.ready;
         installSignalingPeers(provider);
         const tracker = createFakeTracker();
-        const offers = await provider.createOffers();
-        await provider.receiveAnswer(remoteId, offers[0].offer_id, {
-            type: "answer",
-            sdp: "answer-first",
-        });
+        const offers = await provider.createOffers(provider.connectionGeneration);
+        await provider.receiveAnswer(
+            remoteId,
+            offers[0].offer_id,
+            {
+                type: "answer",
+                sdp: "answer-first",
+            },
+            provider.connectionGeneration,
+        );
         const outbound = provider.registry.pendingPeer(remoteId);
 
         await provider.receiveOffer(
@@ -329,6 +346,7 @@ for (const [localId, remoteId, keepsOutbound] of [
             "later-offer",
             { type: "offer", sdp: "later-offer" },
             tracker,
+            provider.connectionGeneration,
         );
 
         const survivor = provider.registry.pendingPeer(remoteId);
@@ -348,12 +366,18 @@ test("lower peer replaces a pending inbound duplicate with its outbound peer", a
         "remote-offer",
         { type: "offer", sdp: "remote" },
         tracker,
+        lower.connectionGeneration,
     );
     const inbound = lower.registry.pendingPeer("b".repeat(20));
     assert.equal(inbound.initiator, false);
-    const offers = await lower.createOffers();
+    const offers = await lower.createOffers(lower.connectionGeneration);
 
-    await lower.receiveAnswer("b".repeat(20), offers[0].offer_id, { type: "answer", sdp: "local" });
+    await lower.receiveAnswer(
+        "b".repeat(20),
+        offers[0].offer_id,
+        { type: "answer", sdp: "local" },
+        lower.connectionGeneration,
+    );
 
     assert.equal(inbound.destroyed, true);
     assert.equal(lower.registry.pendingPeer("b".repeat(20)), peers.at(-1));
@@ -365,17 +389,22 @@ test("peer opening during answer acceptance is preserved", async () => {
     const provider = createProvider("early-open", { maxConns: 1, numwant: 1 });
     await provider.ready;
     const peers = installSignalingPeers(provider);
-    const [offer] = await provider.createOffers();
+    const [offer] = await provider.createOffers(provider.connectionGeneration);
     const peer = peers[0];
     peer.acceptAnswer = async () => {
         peer.connected = true;
-        provider.onPeerOpen(peer, true);
+        provider.onPeerOpen(peer, true, provider.connectionGeneration);
     };
 
-    await provider.receiveAnswer("remote", offer.offer_id, {
-        type: "answer",
-        sdp: "answer",
-    });
+    await provider.receiveAnswer(
+        "remote",
+        offer.offer_id,
+        {
+            type: "answer",
+            sdp: "answer",
+        },
+        provider.connectionGeneration,
+    );
 
     assert.equal(peer.destroyed, false);
     assert.equal(provider.registry.openPeer("remote"), peer);
@@ -389,13 +418,13 @@ test("tracker announces share global pending-offer capacity", async () => {
     await provider.ready;
     installSignalingPeers(provider);
 
-    const firstAnnounceOffers = await provider.createOffers();
-    const secondAnnounceOffers = await provider.createOffers();
+    const firstAnnounceOffers = await provider.createOffers(provider.connectionGeneration);
+    const secondAnnounceOffers = await provider.createOffers(provider.connectionGeneration);
     assert.equal(firstAnnounceOffers.length, 1);
     assert.equal(secondAnnounceOffers.length, 0);
 
     provider.cancelOffers([firstAnnounceOffers[0].offer_id]);
-    const secondAnnounceRetry = await provider.createOffers();
+    const secondAnnounceRetry = await provider.createOffers(provider.connectionGeneration);
     assert.equal(secondAnnounceRetry.length, 1);
     provider.destroy();
 });
@@ -409,14 +438,14 @@ test("canceling an unpublished offer batch restores capacity", async () => {
         forgetOffer: (offerId) => forgotten.push(offerId),
         destroy: () => {},
     });
-    const [offer] = await provider.createOffers();
+    const [offer] = await provider.createOffers(provider.connectionGeneration);
 
     provider.cancelOffers([offer.offer_id]);
 
     assert.equal(provider.pendingOffers.size, 0);
     assert.equal(provider.registry.pendingCount, 0);
     assert.deepEqual(forgotten, [offer.offer_id]);
-    const replacements = await provider.createOffers();
+    const replacements = await provider.createOffers(provider.connectionGeneration);
     assert.equal(replacements.length, 1);
     provider.destroy();
 });
@@ -425,14 +454,19 @@ test("canceled outbound peer cannot regain a timeout after acceptAnswer resolves
     await higher.ready;
     installSignalingPeers(higher);
     const tracker = createFakeTracker();
-    const offers = await higher.createOffers();
+    const offers = await higher.createOffers(higher.connectionGeneration);
     const outbound = higher.pendingOffers.get(offers[0].offer_id).peer;
     let resolveAnswer;
     outbound.acceptAnswer = () => new Promise((resolve) => (resolveAnswer = resolve));
-    const receivingAnswer = higher.receiveAnswer("a".repeat(20), offers[0].offer_id, {
-        type: "answer",
-        sdp: "deferred",
-    });
+    const receivingAnswer = higher.receiveAnswer(
+        "a".repeat(20),
+        offers[0].offer_id,
+        {
+            type: "answer",
+            sdp: "deferred",
+        },
+        higher.connectionGeneration,
+    );
     await Promise.resolve();
 
     await higher.receiveOffer(
@@ -440,6 +474,7 @@ test("canceled outbound peer cannot regain a timeout after acceptAnswer resolves
         "competing-offer",
         { type: "offer", sdp: "competing" },
         tracker,
+        higher.connectionGeneration,
     );
     const inbound = higher.registry.pendingPeer("a".repeat(20));
     assert.equal(inbound.initiator, false);
@@ -457,7 +492,7 @@ test("canceled unresolved offers cannot later be announced", async () => {
     let resolveOffer;
     installSignalingPeers(higher, () => new Promise((resolve) => (resolveOffer = resolve)));
     const tracker = createFakeTracker();
-    const creatingOffers = higher.createOffers();
+    const creatingOffers = higher.createOffers(higher.connectionGeneration);
     await Promise.resolve();
 
     await higher.receiveOffer(
@@ -465,6 +500,7 @@ test("canceled unresolved offers cannot later be announced", async () => {
         "incoming",
         { type: "offer", sdp: "incoming" },
         tracker,
+        higher.connectionGeneration,
     );
     resolveOffer();
     const offers = await creatingOffers;
@@ -479,15 +515,20 @@ test("unrelated outbound answers cannot exceed connected capacity", async () => 
     const provider = createProvider("capacity-owner", { maxConns: 1, numwant: 1 });
     await provider.ready;
     installSignalingPeers(provider);
-    const offers = await provider.createOffers();
+    const offers = await provider.createOffers(provider.connectionGeneration);
     const outbound = provider.pendingOffers.get(offers[0].offer_id).peer;
     const activePeer = { connected: true, initiator: false, send: () => true, destroy: () => {} };
     registerPeer(provider, activePeer, "already-connected", { open: true });
 
-    await provider.receiveAnswer("different-peer", offers[0].offer_id, {
-        type: "answer",
-        sdp: "different-peer",
-    });
+    await provider.receiveAnswer(
+        "different-peer",
+        offers[0].offer_id,
+        {
+            type: "answer",
+            sdp: "different-peer",
+        },
+        provider.connectionGeneration,
+    );
 
     assert.equal(outbound.destroyed, true);
     assert.deepEqual(provider.registry.openPeerIds, ["already-connected"]);
@@ -502,7 +543,7 @@ test("unrelated outbound answers cannot exceed connected capacity", async () => 
         },
     };
     registerPeer(provider, latePeer, "late-unrelated");
-    provider.onPeerOpen(latePeer, false);
+    provider.onPeerOpen(latePeer, false, provider.connectionGeneration);
     assert.equal(latePeer.destroyed, true);
     assert.equal(provider.registry.openCount, 1);
     provider.destroy();
@@ -512,8 +553,8 @@ test("glare cancellation removes only one of multiple outstanding offers", async
     await higher.ready;
     installSignalingPeers(higher);
     const firstTracker = createFakeTracker();
-    await higher.createOffers();
-    await higher.createOffers();
+    await higher.createOffers(higher.connectionGeneration);
+    await higher.createOffers(higher.connectionGeneration);
     assert.equal(higher.pendingOffers.size, 2);
 
     await higher.receiveOffer(
@@ -521,6 +562,7 @@ test("glare cancellation removes only one of multiple outstanding offers", async
         "incoming",
         { type: "offer", sdp: "incoming" },
         firstTracker,
+        higher.connectionGeneration,
     );
 
     assert.equal(higher.pendingOffers.size, 1);
@@ -615,7 +657,7 @@ test("passes send safeguards to the WebRTC transport", async () => {
         maxBufferedAmount: 456,
     });
     await provider.ready;
-    const peer = provider.createPeer("remote", true);
+    const peer = provider.createPeer("remote", true, provider.connectionGeneration);
 
     assert.equal(peer.fallbackMaxMessageSize, 123);
     assert.equal(peer.maxBufferedAmount, 456);
@@ -637,7 +679,7 @@ test("offer collection timeout cancels ICE without peer errors", async (context)
     await provider.ready;
     const errors = [];
     provider.on("peer-error", (error) => errors.push(error));
-    const creatingOffers = provider.createOffers();
+    const creatingOffers = provider.createOffers(provider.connectionGeneration);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -664,7 +706,7 @@ test("ICE fallback offer beats the separate collection deadline", async (context
         RTCPeerConnection: GatheringPeerConnection,
     });
     await provider.ready;
-    const creatingOffers = provider.createOffers();
+    const creatingOffers = provider.createOffers(provider.connectionGeneration);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -693,7 +735,10 @@ test("genuine negotiation failures request recovery announces", async () => {
     installSignalingPeers(outbound.provider, async () => {
         throw new Error("createOffer failed");
     });
-    assert.deepEqual(await outbound.provider.createOffers(), []);
+    assert.deepEqual(
+        await outbound.provider.createOffers(outbound.provider.connectionGeneration),
+        [],
+    );
     assert.equal(outbound.recoveries(), 1);
     outbound.provider.destroy();
 
@@ -701,7 +746,10 @@ test("genuine negotiation failures request recovery announces", async () => {
     constructing.provider.createPeer = () => {
         throw new Error("peer construction failed");
     };
-    assert.deepEqual(await constructing.provider.createOffers(), []);
+    assert.deepEqual(
+        await constructing.provider.createOffers(constructing.provider.connectionGeneration),
+        [],
+    );
     assert.equal(constructing.recoveries(), 1);
     constructing.provider.destroy();
 
@@ -714,6 +762,7 @@ test("genuine negotiation failures request recovery announces", async () => {
         "incoming",
         { type: "offer", sdp: "offer" },
         failedTracker,
+        publishing.provider.connectionGeneration,
     );
     assert.equal(publishing.recoveries(), 1);
     publishing.provider.destroy();
@@ -733,20 +782,26 @@ test("genuine negotiation failures request recovery announces", async () => {
         "incoming",
         { type: "offer", sdp: "offer" },
         createFakeTracker(),
+        incoming.provider.connectionGeneration,
     );
     assert.equal(incoming.recoveries(), 1);
     incoming.provider.destroy();
 
     const answering = await makeProvider("failed-accept-answer");
     const peers = installSignalingPeers(answering.provider);
-    const [offer] = await answering.provider.createOffers();
+    const [offer] = await answering.provider.createOffers(answering.provider.connectionGeneration);
     peers[0].acceptAnswer = async () => {
         throw new Error("acceptAnswer failed");
     };
-    await answering.provider.receiveAnswer("r".repeat(20), offer.offer_id, {
-        type: "answer",
-        sdp: "answer",
-    });
+    await answering.provider.receiveAnswer(
+        "r".repeat(20),
+        offer.offer_id,
+        {
+            type: "answer",
+            sdp: "answer",
+        },
+        answering.provider.connectionGeneration,
+    );
     assert.equal(answering.recoveries(), 1);
     answering.provider.destroy();
 });
@@ -772,7 +827,7 @@ test("throwing peers listeners cannot prevent peer-loss recovery", async () => {
     });
     provider.on("listener-error", (event) => listenerErrors.push(event));
 
-    assert.doesNotThrow(() => provider.removePeer(peer));
+    assert.doesNotThrow(() => provider.removePeer(peer, provider.connectionGeneration));
     assert.equal(recoveryAnnounces, 1);
     assert.equal(laterListenerCalls, 1);
     assert.deepEqual(listenerErrors, [{ eventName: "peers", error: listenerFailure }]);
@@ -784,12 +839,16 @@ test("late Sync Step 2 from a removed peer cannot restore synced", async () => {
     await provider.ready;
     const peer = { connected: true, send: () => true, destroy: () => {} };
     registerPeer(provider, peer, "removed", { open: true });
-    provider.removePeer(peer);
+    provider.removePeer(peer, provider.connectionGeneration);
     const encoder = encoding.createEncoder();
     encoding.writeVarUint(encoder, 0);
     syncProtocol.writeSyncStep2(encoder, provider.doc);
 
-    provider.onPeerMessage(peer, encoding.toUint8Array(encoder).buffer);
+    provider.onPeerMessage(
+        peer,
+        encoding.toUint8Array(encoder).buffer,
+        provider.connectionGeneration,
+    );
 
     assert.equal(provider.synced, false);
     assert.equal(provider.registry.hasSynced, false);
@@ -827,14 +886,19 @@ test("pending signaled peers expire", async (context) => {
         acceptAnswer: async () => {},
         destroy: () => {
             destroyed++;
-            provider.removePeer(peer);
+            provider.removePeer(peer, provider.connectionGeneration);
         },
     };
     registerPeer(provider, peer);
     provider.pendingOffers.set("offer", { peer, tracker: {} });
     provider.startPeerTimeout(peer);
 
-    await provider.receiveAnswer("remote", "offer", { type: "answer", sdp: "answer" });
+    await provider.receiveAnswer(
+        "remote",
+        "offer",
+        { type: "answer", sdp: "answer" },
+        provider.connectionGeneration,
+    );
     context.mock.timers.tick(100);
 
     assert.equal(destroyed, 1);
@@ -857,7 +921,13 @@ test("signal timeout frees capacity while accepting an offer is stuck", async (c
     provider.on("peer-error", (error) => errors.push(error));
     const tracker = createFakeTracker();
 
-    void provider.receiveOffer("remote-1", "offer-1", { type: "offer", sdp: "stuck" }, tracker);
+    void provider.receiveOffer(
+        "remote-1",
+        "offer-1",
+        { type: "offer", sdp: "stuck" },
+        tracker,
+        provider.connectionGeneration,
+    );
     assert.equal(provider.registry.pendingCount, 1);
     assert.ok(provider.registry.pendingPeer("remote-1"));
     context.mock.timers.tick(100);
@@ -867,7 +937,13 @@ test("signal timeout frees capacity while accepting an offer is stuck", async (c
     assert.equal(provider.pendingOffers.size, 0);
     assert.deepEqual(errors, []);
 
-    await provider.receiveOffer("remote-2", "offer-2", { type: "offer", sdp: "usable" }, tracker);
+    await provider.receiveOffer(
+        "remote-2",
+        "offer-2",
+        { type: "offer", sdp: "usable" },
+        tracker,
+        provider.connectionGeneration,
+    );
     assert.equal(tracker.answers.length, 1);
     assert.equal(provider.registry.pendingCount, 1);
     provider.destroy();
@@ -890,13 +966,18 @@ test("signal timeout frees capacity while accepting an answer is stuck", async (
     });
     const errors = [];
     provider.on("peer-error", (error) => errors.push(error));
-    const [offer] = await provider.createOffers();
+    const [offer] = await provider.createOffers(provider.connectionGeneration);
     peers[0].acceptAnswer = () => new Promise(() => {});
 
-    void provider.receiveAnswer("remote-1", offer.offer_id, {
-        type: "answer",
-        sdp: "stuck",
-    });
+    void provider.receiveAnswer(
+        "remote-1",
+        offer.offer_id,
+        {
+            type: "answer",
+            sdp: "stuck",
+        },
+        provider.connectionGeneration,
+    );
     assert.ok(provider.registry.pendingPeer("remote-1"));
     context.mock.timers.tick(100);
 
@@ -906,7 +987,7 @@ test("signal timeout frees capacity while accepting an answer is stuck", async (
     assert.deepEqual(errors, []);
     assert.equal(recoveryAnnounces, 1);
 
-    const replacementOffers = await provider.createOffers();
+    const replacementOffers = await provider.createOffers(provider.connectionGeneration);
     assert.equal(replacementOffers.length, 1);
     provider.destroy();
 });
