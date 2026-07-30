@@ -273,6 +273,55 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         return tracked;
     }
 
+    sendToPeer(peerId: PeerId, message: Uint8Array<ArrayBuffer>): boolean {
+        const peer = this.registry.openPeer(peerId);
+        if (!peer?.connected) return false;
+
+        const encoder = encoding.createEncoder();
+        encoding.writeVarUint(encoder, messageDirect);
+        encoding.writeVarUint8Array(encoder, message);
+        return peer.send(encoding.toUint8Array(encoder));
+    }
+
+    disconnect(): void {
+        const localAwarenessState =
+            this._ownsAwareness && !this.destroyed ? this.awareness.getLocalState() : null;
+        if (localAwarenessState !== null) this.awareness.setLocalState(null);
+        this.shouldConnect = false;
+        this.connectionActive = false;
+        this.connectionPromise = null;
+        this.connectionGeneration++;
+        const disconnectedTrackers = this.trackerConnections;
+        for (const tracker of disconnectedTrackers) tracker.destroy();
+        this.trackerConnections = [];
+        // The generation bump above makes the resulting `onClose` callbacks no-ops, so peers are
+        // destroyed for their side effects on the transport only; the registry is cleared here.
+        for (const peer of this.registry.allPeers) peer.destroy();
+        this.registry.clear();
+        this.pendingOffers.clear();
+        if (this.synced) {
+            this.synced = false;
+            this.emitSafely("synced", [false]);
+        }
+        if (localAwarenessState !== null) this.awareness.setLocalState(localAwarenessState);
+        for (const tracker of disconnectedTrackers) {
+            this.emitSafely("status", [{ status: "disconnected", tracker: tracker.url }]);
+        }
+    }
+
+    override destroy(): void {
+        if (this.destroyed) return;
+        this.destroyed = true;
+        if (this._ownsAwareness && this.awareness.getLocalState() !== null) {
+            this.awareness.setLocalState(null);
+        }
+        this.disconnect();
+        this.doc.off("update", this._docUpdateHandler);
+        this.awareness.off("update", this._awarenessUpdateHandler);
+        if (this._ownsAwareness) this.awareness.destroy();
+        super.destroy();
+    }
+
     private async initializeConnection(generation: number): Promise<void> {
         const infoHash = await createInfoHash(this.roomName);
         if (!this.isCurrentGeneration(generation)) return;
@@ -679,16 +728,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
     }
 
-    private sendProtocolMessage(peer: DataPeer, message: Uint8Array<ArrayBuffer>): boolean {
-        try {
-            if (peer.send(message)) return true;
-        } catch (error) {
-            this.emitSafely("peer-error", [error]);
-        }
-        peer.destroy();
-        return false;
-    }
-
     private sendSyncStep1(peer: DataPeer): boolean {
         const encoder = encoding.createEncoder();
         encoding.writeVarUint(encoder, messageSync);
@@ -722,20 +761,24 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         this.broadcast(encoding.toUint8Array(encoder));
     }
 
-    sendToPeer(peerId: PeerId, message: Uint8Array<ArrayBuffer>): boolean {
-        const peer = this.registry.openPeer(peerId);
-        if (!peer?.connected) return false;
-
-        const encoder = encoding.createEncoder();
-        encoding.writeVarUint(encoder, messageDirect);
-        encoding.writeVarUint8Array(encoder, message);
-        return peer.send(encoding.toUint8Array(encoder));
-    }
-
     private broadcast(message: Uint8Array<ArrayBuffer>): void {
         for (const peer of this.registry.openPeers) {
             if (peer.connected) this.sendProtocolMessage(peer, message);
         }
+    }
+
+    private sendProtocolMessage(peer: DataPeer, message: Uint8Array<ArrayBuffer>): boolean {
+        try {
+            if (peer.send(message)) return true;
+        } catch (error) {
+            this.emitSafely("peer-error", [error]);
+        }
+        peer.destroy();
+        return false;
+    }
+
+    private emitDebug(event: DebugEvent): void {
+        if (this.debug) this.emitSafely("debug", [event]);
     }
 
     private emitSafely<Name extends keyof WebtorrentProviderEvents & string>(
@@ -755,49 +798,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                 }
             }
         }
-    }
-
-    private emitDebug(event: DebugEvent): void {
-        if (this.debug) this.emitSafely("debug", [event]);
-    }
-
-    disconnect(): void {
-        const localAwarenessState =
-            this._ownsAwareness && !this.destroyed ? this.awareness.getLocalState() : null;
-        if (localAwarenessState !== null) this.awareness.setLocalState(null);
-        this.shouldConnect = false;
-        this.connectionActive = false;
-        this.connectionPromise = null;
-        this.connectionGeneration++;
-        const disconnectedTrackers = this.trackerConnections;
-        for (const tracker of disconnectedTrackers) tracker.destroy();
-        this.trackerConnections = [];
-        // The generation bump above makes the resulting `onClose` callbacks no-ops, so peers are
-        // destroyed for their side effects on the transport only; the registry is cleared here.
-        for (const peer of this.registry.allPeers) peer.destroy();
-        this.registry.clear();
-        this.pendingOffers.clear();
-        if (this.synced) {
-            this.synced = false;
-            this.emitSafely("synced", [false]);
-        }
-        if (localAwarenessState !== null) this.awareness.setLocalState(localAwarenessState);
-        for (const tracker of disconnectedTrackers) {
-            this.emitSafely("status", [{ status: "disconnected", tracker: tracker.url }]);
-        }
-    }
-
-    override destroy(): void {
-        if (this.destroyed) return;
-        this.destroyed = true;
-        if (this._ownsAwareness && this.awareness.getLocalState() !== null) {
-            this.awareness.setLocalState(null);
-        }
-        this.disconnect();
-        this.doc.off("update", this._docUpdateHandler);
-        this.awareness.off("update", this._awarenessUpdateHandler);
-        if (this._ownsAwareness) this.awareness.destroy();
-        super.destroy();
     }
 
     private isCurrentGeneration(generation: number): boolean {
