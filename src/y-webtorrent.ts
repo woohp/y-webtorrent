@@ -125,7 +125,7 @@ export interface WebtorrentProviderEvents {
     debug: (event: DebugEvent) => void;
     "direct-message": (peerId: PeerId, data: Uint8Array) => void;
     "listener-error": (event: ListenerErrorEvent) => void;
-    peers: (peerIds: PeerId[]) => void;
+    peers: (peerIds: readonly PeerId[]) => void;
     "peer-error": (error: unknown) => void;
     status: (event: TrackerStatusEvent) => void;
     synced: (synced: boolean) => void;
