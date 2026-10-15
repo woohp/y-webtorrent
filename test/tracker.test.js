@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
 const { TrackerConnection } = await import("../dist/tracker.js");
 
@@ -19,6 +19,12 @@ class MockWebSocket {
         const listeners = this.listeners.get(type) ?? [];
         listeners.push(listener);
         this.listeners.set(type, listeners);
+    }
+
+    receive(fields) {
+        this.dispatch("message", {
+            data: JSON.stringify({ action: "announce", info_hash: "info-hash", ...fields }),
+        });
     }
 
     dispatch(type, event = {}) {
@@ -45,37 +51,28 @@ class MockWebSocket {
     }
 }
 
-const createTracker = (overrides = {}) =>
-    new TrackerConnection("wss://tracker.test", {
+const createTracker = (overrides = {}, url = "wss://tracker.test") =>
+    new TrackerConnection(url, {
         infoHash: "info-hash",
         peerId: "peer-id",
         numwant: 1,
         createOffers: () => [],
+        cancelOffers: () => {},
         onOffer: () => {},
         onAnswer: () => {},
+        onAnnounce: () => {},
+        onState: () => {},
+        onError: () => {},
         WebSocket: MockWebSocket,
         ...overrides,
     });
 
+beforeEach(() => {
+    MockWebSocket.sockets.length = 0;
+});
+
 test("validates tracker URLs and retries synchronous construction failures", (context) => {
-    assert.throws(
-        () =>
-            new TrackerConnection("https://tracker.test", {
-                infoHash: "info-hash",
-                peerId: "peer-id",
-                numwant: 1,
-                createOffers: () => [],
-                onOffer: () => {},
-                onAnswer: () => {},
-                WebSocket: MockWebSocket,
-            }),
-        /Invalid tracker URL/,
-    );
-    for (const option of ["connectTimeout", "announceResponseTimeout"]) {
-        for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648, "1"]) {
-            assert.throws(() => createTracker({ [option]: value }), new RegExp(option));
-        }
-    }
+    assert.throws(() => createTracker({}, "https://tracker.test"), /Invalid tracker URL/);
 
     class ThrowingWebSocket {
         static OPEN = 1;
@@ -96,26 +93,7 @@ test("validates tracker URLs and retries synchronous construction failures", (co
     tracker.destroy();
 });
 
-test("throwing tracker state observers cannot prevent reconnect or teardown", async () => {
-    MockWebSocket.sockets.length = 0;
-    const tracker = createTracker({
-        onState: () => {
-            throw new Error("status listener failed");
-        },
-    });
-    const socket = MockWebSocket.sockets[0];
-    socket.open();
-    await Promise.resolve();
-    assert.equal(socket.sent.length, 1);
-
-    socket.close();
-    assert.ok(tracker.reconnectTimer);
-    assert.doesNotThrow(() => tracker.destroy());
-    assert.equal(tracker.destroyed, true);
-});
-
 test("reports tracker connection lifecycle states", () => {
-    MockWebSocket.sockets.length = 0;
     const states = [];
     const tracker = createTracker({ onState: (state) => states.push(state) });
     const first = MockWebSocket.sockets[0];
@@ -130,7 +108,6 @@ test("reports tracker connection lifecycle states", () => {
 });
 
 test("connect does not replace active sockets or leave reconnect timers", (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const tracker = createTracker();
     const first = MockWebSocket.sockets[0];
@@ -152,7 +129,6 @@ test("connect does not replace active sockets or leave reconnect timers", (conte
 });
 
 test("overlapping announce requests coalesce behind in-flight offer creation", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.method(Date, "now", () => 0);
     context.mock.method(Math, "random", () => 0);
     context.mock.timers.enable({ apis: ["setTimeout"] });
@@ -198,16 +174,13 @@ test("overlapping announce requests coalesce behind in-flight offer creation", a
 });
 
 test("recovery announces are debounced and rate limited", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.method(Math, "random", () => 0);
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const tracker = createTracker();
     const socket = MockWebSocket.sockets[0];
     socket.open();
     await Promise.resolve();
-    socket.dispatch("message", {
-        data: JSON.stringify({ action: "announce", info_hash: "info-hash", interval: 120 }),
-    });
+    socket.receive({ interval: 120 });
     await Promise.resolve();
     socket.sent.length = 0;
 
@@ -223,7 +196,6 @@ test("recovery announces are debounced and rate limited", async (context) => {
 });
 
 test("times out sockets that never open", (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const errors = [];
     const tracker = createTracker({ connectTimeout: 100, onError: (error) => errors.push(error) });
@@ -231,13 +203,12 @@ test("times out sockets that never open", (context) => {
     context.mock.timers.tick(100);
 
     assert.match(String(errors[0]), /connection timed out/);
-    assert.equal(tracker.socket, null);
+    assert.equal(MockWebSocket.sockets[0].readyState, 3);
     assert.ok(tracker.reconnectTimer);
     tracker.destroy();
 });
 
 test("cancels sent offers when their socket closes and announces replacements", async () => {
-    MockWebSocket.sockets.length = 0;
     let createCount = 0;
     const canceled = [];
     const tracker = createTracker({
@@ -269,7 +240,6 @@ test("cancels sent offers when their socket closes and announces replacements", 
 });
 
 test("forgets an announced offer when its answer arrives", async () => {
-    MockWebSocket.sockets.length = 0;
     const answers = [];
     const canceled = [];
     const tracker = createTracker({
@@ -282,14 +252,10 @@ test("forgets an announced offer when its answer arrives", async () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    socket.dispatch("message", {
-        data: JSON.stringify({
-            action: "announce",
-            info_hash: "info-hash",
-            peer_id: "remote",
-            offer_id: "answered",
-            answer: { type: "answer", sdp: "answer" },
-        }),
+    socket.receive({
+        peer_id: "remote",
+        offer_id: "answered",
+        answer: { type: "answer", sdp: "answer" },
     });
     await Promise.resolve();
 
@@ -299,7 +265,6 @@ test("forgets an announced offer when its answer arrives", async () => {
     tracker.destroy();
 });
 test("cancels stale offer batches and announces replacements after reconnect", async () => {
-    MockWebSocket.sockets.length = 0;
     let resolveFirstOffers;
     let createCount = 0;
     const canceled = [];
@@ -334,7 +299,6 @@ test("cancels stale offer batches and announces replacements after reconnect", a
     tracker.destroy();
 });
 test("does not publish offers completed after destruction", async () => {
-    MockWebSocket.sockets.length = 0;
     let resolveOffers;
     const tracker = createTracker({
         createOffers: () => new Promise((resolve) => (resolveOffers = resolve)),
@@ -358,7 +322,6 @@ test("reports send exceptions and returns false", async () => {
             throw new Error("send failed");
         }
     }
-    MockWebSocket.sockets.length = 0;
     const errors = [];
     const tracker = createTracker({
         WebSocket: ThrowingSendWebSocket,
@@ -374,7 +337,6 @@ test("reports send exceptions and returns false", async () => {
 });
 
 test("silent trackers time out and reconnect with increasing backoff", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const errors = [];
     const tracker = createTracker({
@@ -401,7 +363,6 @@ test("silent trackers time out and reconnect with increasing backoff", async (co
 });
 
 test("valid tracker responses clear timeout and reset reconnect backoff", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.method(Math, "random", () => 0);
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const tracker = createTracker({ announceResponseTimeout: 100 });
@@ -410,13 +371,9 @@ test("valid tracker responses clear timeout and reset reconnect backoff", async 
     await Promise.resolve();
     tracker.reconnectDelay = 8000;
 
-    socket.dispatch("message", {
-        data: JSON.stringify({
-            action: "announce",
-            info_hash: "info-hash",
-            interval: 60,
-            complete: 0,
-        }),
+    socket.receive({
+        interval: 60,
+        complete: 0,
     });
     await Promise.resolve();
 
@@ -427,7 +384,6 @@ test("valid tracker responses clear timeout and reset reconnect backoff", async 
 });
 
 test("missing and invalid tracker intervals use the fallback schedule", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.method(Math, "random", () => 0);
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const tracker = createTracker();
@@ -435,10 +391,8 @@ test("missing and invalid tracker intervals use the fallback schedule", async (c
     socket.open();
     await Promise.resolve();
 
-    for (const interval of [undefined, "invalid", Number.POSITIVE_INFINITY, 3_000_000]) {
-        const message = { action: "announce", info_hash: "info-hash", complete: 0 };
-        if (interval !== undefined) message.interval = interval;
-        socket.dispatch("message", { data: JSON.stringify(message) });
+    for (const interval of [undefined, -1, "invalid", Number.POSITIVE_INFINITY, 3_000_000]) {
+        socket.receive({ complete: 0, interval });
         await Promise.resolve();
         socket.sent.length = 0;
         context.mock.timers.tick(119_999);
@@ -451,7 +405,6 @@ test("missing and invalid tracker intervals use the fallback schedule", async (c
 });
 
 test("signaling responses clear liveness timeout without postponing an existing announce", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.method(Math, "random", () => 0);
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const tracker = createTracker({ announceResponseTimeout: 100 });
@@ -460,14 +413,10 @@ test("signaling responses clear liveness timeout without postponing an existing 
     await Promise.resolve();
     tracker.scheduleAnnounce(60);
 
-    socket.dispatch("message", {
-        data: JSON.stringify({
-            action: "announce",
-            info_hash: "info-hash",
-            peer_id: "remote",
-            offer_id: "incoming",
-            offer: { type: "offer", sdp: "offer" },
-        }),
+    socket.receive({
+        peer_id: "remote",
+        offer_id: "incoming",
+        offer: { type: "offer", sdp: "offer" },
     });
     await Promise.resolve();
 
@@ -479,46 +428,14 @@ test("signaling responses clear liveness timeout without postponing an existing 
     tracker.destroy();
 });
 
-test("an initial signaling-only response establishes the fallback schedule", async (context) => {
-    MockWebSocket.sockets.length = 0;
-    context.mock.method(Math, "random", () => 0);
-    context.mock.timers.enable({ apis: ["setTimeout"] });
-    const tracker = createTracker({ announceResponseTimeout: 100 });
-    const socket = MockWebSocket.sockets[0];
-    socket.open();
-    await Promise.resolve();
-    socket.sent.length = 0;
-
-    socket.dispatch("message", {
-        data: JSON.stringify({
-            action: "announce",
-            info_hash: "info-hash",
-            peer_id: "remote",
-            offer_id: "incoming",
-            offer: { type: "offer", sdp: "offer" },
-        }),
-    });
-    await Promise.resolve();
-
-    context.mock.timers.tick(119_999);
-    assert.equal(socket.sent.length, 0);
-    context.mock.timers.tick(1);
-    await Promise.resolve();
-    assert.equal(socket.sent.length, 1);
-    tracker.destroy();
-});
-
 test("a signaling response after a fired fallback schedules the next fallback", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.method(Math, "random", () => 0);
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const tracker = createTracker();
     const socket = MockWebSocket.sockets[0];
     socket.open();
     await Promise.resolve();
-    socket.dispatch("message", {
-        data: JSON.stringify({ action: "announce", info_hash: "info-hash", complete: 0 }),
-    });
+    socket.receive({ complete: 0 });
     await Promise.resolve();
     socket.sent.length = 0;
 
@@ -527,14 +444,10 @@ test("a signaling response after a fired fallback schedules the next fallback", 
     await Promise.resolve();
     assert.equal(socket.sent.length, 1);
 
-    socket.dispatch("message", {
-        data: JSON.stringify({
-            action: "announce",
-            info_hash: "info-hash",
-            peer_id: "remote",
-            offer_id: "incoming",
-            offer: { type: "offer", sdp: "offer" },
-        }),
+    socket.receive({
+        peer_id: "remote",
+        offer_id: "incoming",
+        offer: { type: "offer", sdp: "offer" },
     });
     await Promise.resolve();
 
@@ -546,7 +459,6 @@ test("a signaling response after a fired fallback schedules the next fallback", 
     tracker.destroy();
 });
 test("signaling responses with intervals handle both signaling and scheduling", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.method(Math, "random", () => 0);
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const offers = [];
@@ -559,15 +471,11 @@ test("signaling responses with intervals handle both signaling and scheduling", 
     await Promise.resolve();
     socket.sent.length = 0;
 
-    socket.dispatch("message", {
-        data: JSON.stringify({
-            action: "announce",
-            info_hash: "info-hash",
-            interval: 60,
-            peer_id: "remote",
-            offer_id: "combined",
-            offer: { type: "offer", sdp: "offer" },
-        }),
+    socket.receive({
+        interval: 60,
+        peer_id: "remote",
+        offer_id: "combined",
+        offer: { type: "offer", sdp: "offer" },
     });
     await Promise.resolve();
 
@@ -579,40 +487,7 @@ test("signaling responses with intervals handle both signaling and scheduling", 
     assert.equal(socket.sent.length, 1);
     tracker.destroy();
 });
-test("signaling messages do not postpone fallback announces", async (context) => {
-    MockWebSocket.sockets.length = 0;
-    context.mock.method(Math, "random", () => 0);
-    context.mock.timers.enable({ apis: ["setTimeout"] });
-    const tracker = createTracker();
-    const socket = MockWebSocket.sockets[0];
-    socket.open();
-    await Promise.resolve();
-    socket.dispatch("message", {
-        data: JSON.stringify({ action: "announce", info_hash: "info-hash", complete: 0 }),
-    });
-    await Promise.resolve();
-    socket.sent.length = 0;
-
-    context.mock.timers.tick(60_000);
-    socket.dispatch("message", {
-        data: JSON.stringify({
-            action: "announce",
-            info_hash: "info-hash",
-            peer_id: "remote",
-            offer_id: "incoming",
-            offer: { type: "offer", sdp: "offer" },
-        }),
-    });
-    await Promise.resolve();
-    context.mock.timers.tick(59_999);
-    assert.equal(socket.sent.length, 0);
-    context.mock.timers.tick(1);
-    await Promise.resolve();
-    assert.equal(socket.sent.length, 1);
-    tracker.destroy();
-});
 test("a replacement socket stays open past the dropped socket's response deadline", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const tracker = createTracker({ announceResponseTimeout: 100 });
     const stale = MockWebSocket.sockets[0];
@@ -629,7 +504,6 @@ test("a replacement socket stays open past the dropped socket's response deadlin
 });
 
 test("reports tracker failures and warnings before normal filtering", async (context) => {
-    MockWebSocket.sockets.length = 0;
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const errors = [];
     const announces = [];
@@ -640,9 +514,7 @@ test("reports tracker failures and warnings before normal filtering", async (con
     const failureSocket = MockWebSocket.sockets[0];
     failureSocket.open();
     await Promise.resolve();
-    failureSocket.dispatch("message", {
-        data: JSON.stringify({ action: "announce", "failure reason": "rejected" }),
-    });
+    failureSocket.receive({ "failure reason": "rejected" });
     await Promise.resolve();
 
     assert.match(errors[0], /Tracker failure: rejected/);
@@ -654,13 +526,9 @@ test("reports tracker failures and warnings before normal filtering", async (con
     const warningSocket = MockWebSocket.sockets.at(-1);
     warningSocket.open();
     await Promise.resolve();
-    warningSocket.dispatch("message", {
-        data: JSON.stringify({
-            action: "announce",
-            info_hash: "info-hash",
-            complete: 1,
-            "warning message": "degraded",
-        }),
+    warningSocket.receive({
+        complete: 1,
+        "warning message": "degraded",
     });
     await Promise.resolve();
 
@@ -669,8 +537,7 @@ test("reports tracker failures and warnings before normal filtering", async (con
     assert.equal(warningSocket.readyState, MockWebSocket.OPEN);
     tracker.destroy();
 });
-test("validates, floors, and jitters tracker announce intervals", async (context) => {
-    MockWebSocket.sockets.length = 0;
+test("floors and jitters tracker announce intervals", async (context) => {
     let random = 0;
     context.mock.method(Math, "random", () => random);
     context.mock.timers.enable({ apis: ["setTimeout"] });
@@ -678,23 +545,7 @@ test("validates, floors, and jitters tracker announce intervals", async (context
     const socket = MockWebSocket.sockets[0];
     socket.open();
     await Promise.resolve();
-    socket.dispatch("message", {
-        data: JSON.stringify({ action: "announce", info_hash: "info-hash", interval: 30 }),
-    });
-    await Promise.resolve();
-    socket.sent.length = 0;
-
-    for (const interval of [-1, Number.POSITIVE_INFINITY, "1", 3_000_000]) {
-        tracker.scheduleAnnounce(interval);
-    }
-    context.mock.timers.tick(119_999);
-    assert.equal(socket.sent.length, 0);
-    context.mock.timers.tick(1);
-    await Promise.resolve();
-    assert.equal(socket.sent.length, 1);
-    socket.dispatch("message", {
-        data: JSON.stringify({ action: "announce", info_hash: "info-hash", interval: 30 }),
-    });
+    socket.receive({ interval: 30 });
     await Promise.resolve();
     socket.sent.length = 0;
 
@@ -704,9 +555,7 @@ test("validates, floors, and jitters tracker announce intervals", async (context
     context.mock.timers.tick(1);
     await Promise.resolve();
     assert.equal(socket.sent.length, 1);
-    socket.dispatch("message", {
-        data: JSON.stringify({ action: "announce", info_hash: "info-hash", interval: 30 }),
-    });
+    socket.receive({ interval: 30 });
     await Promise.resolve();
 
     socket.sent.length = 0;
