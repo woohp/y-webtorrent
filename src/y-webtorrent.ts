@@ -28,34 +28,17 @@ export const defaultRtcConfig: RTCConfiguration = {
     ],
 };
 
-const cloneDefaultRtcConfig = (): RTCConfiguration => {
-    const iceServers = defaultRtcConfig.iceServers?.map((server) => ({
-        ...server,
-        urls: Array.isArray(server.urls) ? [...server.urls] : server.urls,
-    }));
-    return { ...defaultRtcConfig, ...(iceServers ? { iceServers } : {}) };
-};
-
 const maximumTimerDelay = 2_147_483_647;
 
-const validatePeerId = (peerId: string): PeerId => {
-    if (typeof peerId !== "string") throw new TypeError("peerId must be a string");
-    if (peerId.length !== 20 || [...peerId].some((character) => character.charCodeAt(0) > 255)) {
-        throw new RangeError("peerId must be a raw 20-character binary string");
-    }
-    return peerId;
-};
-
 const validateCount = (name: string, value: number): number => {
-    if (typeof value !== "number") throw new TypeError(`${name} must be a number`);
-    if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
-        throw new RangeError(`${name} must be a finite, non-negative integer`);
+    if (!Number.isInteger(value) || value < 0) {
+        throw new RangeError(`${name} must be a non-negative integer`);
     }
     return value;
 };
 
+// setTimeout fires immediately when its delay overflows a signed 32-bit integer.
 const validateTimeout = (name: string, value: number): number => {
-    if (typeof value !== "number") throw new TypeError(`${name} must be a number`);
     if (!Number.isFinite(value) || value < 0 || value > maximumTimerDelay) {
         throw new RangeError(`${name} must be between 0 and ${maximumTimerDelay}`);
     }
@@ -63,8 +46,7 @@ const validateTimeout = (name: string, value: number): number => {
 };
 
 const validateLimit = (name: string, value: number): number => {
-    if (typeof value !== "number") throw new TypeError(`${name} must be a number`);
-    if (Number.isNaN(value) || value < 0) {
+    if (typeof value !== "number" || !(value >= 0)) {
         throw new RangeError(`${name} must be non-negative or Infinity`);
     }
     return value;
@@ -131,40 +113,6 @@ export interface WebtorrentProviderEvents {
     synced: (synced: boolean) => void;
 }
 
-const readMessage = (
-    provider: WebtorrentProvider,
-    peer: DataPeer,
-    peerId: PeerId | null,
-    data: ArrayBuffer,
-    sendProtocolMessage: (message: Uint8Array<ArrayBuffer>) => boolean,
-    sendAwareness: () => boolean,
-    emitDirectMessage: (data: Uint8Array) => void,
-): boolean => {
-    const decoder = decoding.createDecoder(new Uint8Array(data));
-    const encoder = encoding.createEncoder();
-    const messageType = decoding.readVarUint(decoder);
-
-    if (messageType === messageSync) {
-        encoding.writeVarUint(encoder, messageSync);
-        const syncType = syncProtocol.readSyncMessage(decoder, encoder, provider.doc, peer);
-        if (encoding.length(encoder) > 1 && !sendProtocolMessage(encoding.toUint8Array(encoder))) {
-            return false;
-        }
-        return syncType === syncProtocol.messageYjsSyncStep2;
-    } else if (messageType === messageAwareness) {
-        awarenessProtocol.applyAwarenessUpdate(
-            provider.awareness,
-            decoding.readVarUint8Array(decoder),
-            peer,
-        );
-    } else if (messageType === messageQueryAwareness) {
-        sendAwareness();
-    } else if (messageType === messageDirect && peerId) {
-        emitDirectMessage(decoding.readVarUint8Array(decoder));
-    }
-    return false;
-};
-
 export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     readonly roomName: string;
     readonly doc: Y.Doc;
@@ -184,7 +132,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     readonly debug: boolean;
     readonly awareness: Awareness;
     readonly ready: Promise<void>;
-    shouldConnect = true;
+    shouldConnect = false;
     synced = false;
     infoHash: string | null = null;
     private trackerConnections: TrackerConnection[] = [];
@@ -196,7 +144,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     private readonly _docUpdateHandler: DocUpdateHandler;
     private readonly _awarenessUpdateHandler: AwarenessUpdateHandler;
     private connectionGeneration = 0;
-    private connectionActive = false;
     private connectionPromise: Promise<void> | null = null;
     private destroyed = false;
 
@@ -229,9 +176,9 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             "maxBufferedAmount",
             opts.maxBufferedAmount ?? 4 * 1024 * 1024,
         );
-        this.rtcConfig = opts.rtcConfig ?? cloneDefaultRtcConfig();
+        this.rtcConfig = opts.rtcConfig ?? defaultRtcConfig;
         this.channelName = opts.channelName ?? "y-webtorrent";
-        this.peerId = opts.peerId === undefined ? createPeerId() : validatePeerId(opts.peerId);
+        this.peerId = opts.peerId ?? createPeerId();
         this.debug = !!opts.debug;
         this._WebSocket = opts.WebSocket;
         this._RTCPeerConnection = opts.RTCPeerConnection;
@@ -255,15 +202,14 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     connect(): Promise<void> {
         if (this.destroyed) return Promise.resolve();
         if (this.connectionPromise) return this.connectionPromise;
-        if (this.connectionActive) return Promise.resolve();
+        if (this.shouldConnect) return Promise.resolve();
 
         this.shouldConnect = true;
-        this.connectionActive = true;
         const generation = ++this.connectionGeneration;
         const attempt = this.initializeConnection(generation);
         const tracked = attempt
             .catch((error: unknown) => {
-                if (generation === this.connectionGeneration) this.connectionActive = false;
+                if (generation === this.connectionGeneration) this.shouldConnect = false;
                 throw error;
             })
             .finally(() => {
@@ -288,7 +234,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             this._ownsAwareness && !this.destroyed ? this.awareness.getLocalState() : null;
         if (localAwarenessState !== null) this.awareness.setLocalState(null);
         this.shouldConnect = false;
-        this.connectionActive = false;
         this.connectionPromise = null;
         this.connectionGeneration++;
         const disconnectedTrackers = this.trackerConnections;
@@ -362,13 +307,13 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
                     },
                     onAnnounce: (message: Parameters<TrackerConnection["onAnnounce"]>[0]) => {
                         if (!this.isCurrentGeneration(generation)) return;
-                        this.emitDebug({
+                        this.emitDebug(() => ({
                             type: "tracker-announce-response",
                             tracker: trackerUrl,
                             interval: message.interval,
                             complete: message.complete,
                             incomplete: message.incomplete,
-                        });
+                        }));
                         this.emitSafely("announce", [message]);
                     },
                     onState: (status: Parameters<TrackerConnection["onState"]>[0]) => {
@@ -454,13 +399,13 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         }
 
         if (negotiationFailed) this.requestRecoveryAnnounce();
-        this.emitDebug({
+        this.emitDebug(() => ({
             type: "offers-created",
             count: offers.length,
             requested: count,
             batchElapsedMs: Date.now() - startedAt,
             candidateTypes: collectCandidateTypes(offers.map((entry) => entry.offer)),
-        });
+        }));
         return offers;
     }
 
@@ -479,13 +424,13 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         generation: number,
     ): Promise<void> {
         if (!this.isCurrentGeneration(generation)) return;
-        this.emitDebug({
+        this.emitDebug(() => ({
             type: "offer-received",
             peerId,
             offerId,
             tracker: tracker.url,
             candidateTypes: collectCandidateTypes([offer]),
-        });
+        }));
         if (peerId === this.peerId || this.registry.hasOpen(peerId)) return;
         const identifiedPending = this.registry.pendingPeer(peerId);
         if (identifiedPending) {
@@ -496,14 +441,12 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             }
         }
 
-        const competingOffer = this.pendingOffers.entries().next().value as
-            | [OfferId, PendingOffer]
-            | undefined;
+        const competingOffer = this.pendingOffers.values().next().value;
         const peerCount = this.registry.size;
         if (peerCount >= this.maxConns) {
             if (!competingOffer || this.maxConns === 0) return;
             if (this.peerId > peerId) {
-                this.cancelPendingPeer(competingOffer[1].peer);
+                this.cancelPendingPeer(competingOffer.peer);
             } else {
                 // Allow one temporary inbound peer so one-way offer delivery can still connect.
                 // A later answer deterministically removes the losing duplicate.
@@ -524,14 +467,14 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         try {
             const startedAt = Date.now();
             const answer = await peer.acceptOffer(offer);
-            this.emitDebug({
+            this.emitDebug(() => ({
                 type: "answer-created",
                 peerId,
                 offerId,
                 tracker: tracker.url,
                 answerElapsedMs: Date.now() - startedAt,
                 candidateTypes: collectCandidateTypes([answer]),
-            });
+            }));
             if (
                 !this.isCurrentGeneration(generation) ||
                 this.registry.pendingPeer(peerId) !== peer
@@ -570,13 +513,13 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         generation: number,
     ): Promise<void> {
         if (!this.isCurrentGeneration(generation)) return;
-        this.emitDebug({
+        this.emitDebug(() => ({
             type: "answer-received",
             peerId,
             offerId,
             knownOffer: this.pendingOffers.has(offerId),
             candidateTypes: collectCandidateTypes([answer]),
-        });
+        }));
         const pending = this.pendingOffers.get(offerId);
         if (!pending || peerId === this.peerId) return;
 
@@ -646,17 +589,13 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             onError: (_peer, error) => {
                 if (this.isCurrentGeneration(generation)) this.emitSafely("peer-error", [error]);
             },
-            onDebug: (event) => this.emitDebug({ ...event, type: String(event["type"]) }),
+            onDebug: (event) => this.emitDebug(() => event as DebugEvent),
         });
         this.registry.add(peer, remotePeerId, Date.now());
-        this.emitDebug({
+        this.emitDebug(() => ({
             type: "peer-created",
             initiator,
-            hasRtcPeerConnection:
-                this._RTCPeerConnection !== undefined ||
-                typeof globalThis.RTCPeerConnection !== "undefined",
-            hasRtcSessionDescription: typeof globalThis.RTCSessionDescription !== "undefined",
-        });
+        }));
         return peer;
     }
 
@@ -665,8 +604,9 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             this.cancelPendingPeer(peer);
             return;
         }
-        const peerId = this.registry.peerIdOf(peer);
-        if (!peerId) {
+        const slot = this.registry.get(peer);
+        const peerId = slot?.peerId;
+        if (!slot || !peerId) {
             this.cancelPendingPeer(peer);
             return;
         }
@@ -680,16 +620,13 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             return;
         }
         this.forgetPendingOffer(peer);
-        const startedAt = this.registry.get(peer)?.startedAt;
         this.registry.promote(peer);
-        this.emitDebug({
+        this.emitDebug(() => ({
             type: "peer-connect",
             peerId,
             initiator,
-            // Omitted rather than zeroed when unknown: 0 is also a legitimate same-tick open,
-            // and a missing start time means the peer bypassed `createPeer`.
-            ...(startedAt === undefined ? {} : { connectElapsedMs: Date.now() - startedAt }),
-        });
+            connectElapsedMs: Date.now() - slot.startedAt,
+        }));
         if (!this.sendSyncStep1(peer) || !this.sendAwareness(peer)) return;
         this.emitSafely("peers", [this.registry.openPeerIds]);
     }
@@ -699,22 +636,38 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         const peerId = this.registry.peerIdOf(peer);
         if (!peerId || this.registry.openPeer(peerId) !== peer || !peer.connected) return;
         try {
-            if (
-                readMessage(
-                    this,
-                    peer,
-                    peerId,
-                    data,
-                    (message) => this.sendProtocolMessage(peer, message),
-                    () => this.sendAwareness(peer),
-                    (message) => this.emitSafely("direct-message", [peerId, message]),
-                )
-            ) {
-                this.markSynced(peer);
-            }
+            this.readMessage(peer, peerId, data);
         } catch (error) {
             this.emitSafely("peer-error", [error]);
             peer.destroy();
+        }
+    }
+
+    private readMessage(peer: DataPeer, peerId: PeerId, data: ArrayBuffer): void {
+        const decoder = decoding.createDecoder(new Uint8Array(data));
+        const messageType = decoding.readVarUint(decoder);
+
+        if (messageType === messageSync) {
+            const encoder = encoding.createEncoder();
+            encoding.writeVarUint(encoder, messageSync);
+            const syncType = syncProtocol.readSyncMessage(decoder, encoder, this.doc, peer);
+            if (
+                encoding.length(encoder) > 1 &&
+                !this.sendProtocolMessage(peer, encoding.toUint8Array(encoder))
+            ) {
+                return;
+            }
+            if (syncType === syncProtocol.messageYjsSyncStep2) this.markSynced(peer);
+        } else if (messageType === messageAwareness) {
+            awarenessProtocol.applyAwarenessUpdate(
+                this.awareness,
+                decoding.readVarUint8Array(decoder),
+                peer,
+            );
+        } else if (messageType === messageQueryAwareness) {
+            this.sendAwareness(peer);
+        } else if (messageType === messageDirect) {
+            this.emitSafely("direct-message", [peerId, decoding.readVarUint8Array(decoder)]);
         }
     }
 
@@ -777,8 +730,9 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         return false;
     }
 
-    private emitDebug(event: DebugEvent): void {
-        if (this.debug) this.emitSafely("debug", [event]);
+    /** Takes a thunk so debug payloads, such as SDP candidate scans, cost nothing when off. */
+    private emitDebug(createEvent: () => DebugEvent): void {
+        if (this.debug) this.emitSafely("debug", [createEvent()]);
     }
 
     private emitSafely<Name extends keyof WebtorrentProviderEvents & string>(
@@ -838,7 +792,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         this.registry.setTimer(
             peer,
             setTimeout(() => {
-                this.registry.clearTimer(peer);
                 this.cancelPendingPeer(peer);
                 this.requestRecoveryAnnounce();
             }, this.signalTimeout),

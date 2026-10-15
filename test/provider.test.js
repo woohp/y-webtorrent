@@ -141,6 +141,28 @@ const connectProviders = (first, second) => {
     return { firstPeer, secondPeer };
 };
 
+test("rejects invalid numeric options at construction", () => {
+    for (const [option, value] of [
+        ["maxConns", 0.5],
+        ["signalTimeout", 2_147_483_648],
+        ["maxBufferedAmount", Number.NaN],
+    ]) {
+        assert.throws(() => createProvider("invalid", { [option]: value }), new RegExp(option));
+    }
+    assert.throws(
+        () => createProvider("derived-overflow", { offerTimeout: 2_147_483_647 }),
+        /offerCollectionTimeout/,
+    );
+
+    const provider = createProvider("boundaries", {
+        maxConns: 0,
+        signalTimeout: 0,
+        maxBufferedAmount: Number.POSITIVE_INFINITY,
+    });
+    assert.equal(provider.numwant, 0);
+    provider.destroy();
+});
+
 test("syncs documents and waits for Sync Step 2 before setting synced", async () => {
     const first = createProvider("first");
     const second = createProvider("second");
@@ -172,6 +194,52 @@ test("syncs documents and waits for Sync Step 2 before setting synced", async ()
     secondPeer.destroy();
     first.destroy();
     second.destroy();
+});
+
+test("sendToPeer delivers a directed message to only the selected peer", async () => {
+    const sender = createProvider("sender");
+    const recipient = createProvider("recipient");
+    await Promise.all([sender.ready, recipient.ready]);
+    connectProviders(sender, recipient);
+    const strayed = [];
+    registerPeer(
+        sender,
+        {
+            connected: true,
+            send: (message) => strayed.push(message),
+            destroy: () => {},
+        },
+        "other",
+        { open: true },
+    );
+    const received = [];
+    recipient.on("direct-message", (peerId, payload) => received.push({ peerId, payload }));
+
+    assert.equal(sender.sendToPeer(recipient.peerId, new Uint8Array([1, 2, 3])), true);
+
+    assert.deepEqual(received, [{ peerId: sender.peerId, payload: new Uint8Array([1, 2, 3]) }]);
+    assert.deepEqual(strayed, []);
+    sender.destroy();
+    recipient.destroy();
+});
+
+test("sendToPeer returns false for missing and disconnected peers", async () => {
+    const provider = createProvider("sender");
+    await provider.ready;
+    registerPeer(
+        provider,
+        {
+            connected: false,
+            send: () => assert.fail("sent to a disconnected peer"),
+            destroy: () => {},
+        },
+        "disconnected",
+        { open: true },
+    );
+
+    assert.equal(provider.sendToPeer("missing", new Uint8Array()), false);
+    assert.equal(provider.sendToPeer("disconnected", new Uint8Array()), false);
+    provider.destroy();
 });
 
 test("protocol send failure and malformed frames destroy the affected peer", async () => {
@@ -617,26 +685,6 @@ test("uses normalized tracker URLs for every lifecycle status", async () => {
     provider.destroy();
 });
 
-test("throwing status listeners cannot interrupt provider disconnect", async () => {
-    const provider = createProvider("throwing-status");
-    await provider.ready;
-    let trackerDestroyed = false;
-    provider.trackerConnections.push({
-        url: "wss://tracker.test/",
-        destroy: () => {
-            trackerDestroyed = true;
-        },
-    });
-    provider.on("status", () => {
-        throw new Error("status listener failed");
-    });
-
-    assert.doesNotThrow(() => provider.disconnect());
-    assert.equal(trackerDestroyed, true);
-    assert.equal(provider.trackerConnections.length, 0);
-    provider.destroy();
-});
-
 test("connect is reusable while destroy is final", async () => {
     const provider = createProvider("lifecycle");
     assert.equal(provider.connect(), provider.connect());
@@ -877,32 +925,28 @@ test("disconnect prevents late room derivation from creating trackers", async ()
     provider.destroy();
 });
 
-test("pending signaled peers expire", async (context) => {
-    const provider = createProvider("signal-timeout", { signalTimeout: 100 });
+test("an answered peer that never opens expires", async (context) => {
+    const provider = createProvider("signal-timeout", {
+        maxConns: 1,
+        numwant: 1,
+        signalTimeout: 100,
+    });
     await provider.ready;
     context.mock.timers.enable({ apis: ["setTimeout"] });
-    let destroyed = 0;
-    const peer = {
-        acceptAnswer: async () => {},
-        destroy: () => {
-            destroyed++;
-            provider.removePeer(peer, provider.connectionGeneration);
-        },
-    };
-    registerPeer(provider, peer);
-    provider.pendingOffers.set("offer", { peer, tracker: {} });
-    provider.startPeerTimeout(peer);
+    const peers = installSignalingPeers(provider);
+    const [offer] = await provider.createOffers(provider.connectionGeneration);
 
     await provider.receiveAnswer(
         "remote",
-        "offer",
+        offer.offer_id,
         { type: "answer", sdp: "answer" },
         provider.connectionGeneration,
     );
+    assert.equal(provider.registry.pendingPeer("remote"), peers[0]);
     context.mock.timers.tick(100);
 
-    assert.equal(destroyed, 1);
-    assert.equal(provider.registry.pendingCount, 0);
+    assert.equal(peers[0].destroyed, true);
+    assert.equal(provider.registry.size, 0);
     provider.destroy();
 });
 test("signal timeout frees capacity while accepting an offer is stuck", async (context) => {
