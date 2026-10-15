@@ -240,20 +240,15 @@ export class TrackerConnection {
             }
             if (offers.length > 0) message.offers = offers;
         }
-        try {
-            const sent = this.send(message, session);
-            if (sent) {
-                this.lastAnnounceAt = Date.now();
-                this.trackOfferBatch(session, offers);
-                if (event !== "stopped") this.startAnnounceResponseTimeout(session);
-            } else {
-                this.cancelOfferBatch(offers);
-            }
-            return sent;
-        } catch (error) {
+        const sent = this.send(message, session);
+        if (sent) {
+            this.lastAnnounceAt = Date.now();
+            this.trackOfferBatch(session, offers);
+            if (event !== "stopped") this.startAnnounceResponseTimeout(session);
+        } else {
             this.cancelOfferBatch(offers);
-            throw error;
         }
+        return sent;
     }
 
     private startAnnounceResponseTimeout(session: TrackerSession): void {

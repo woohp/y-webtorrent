@@ -2,7 +2,7 @@
 
 y-webtorrent is a browser-oriented Yjs provider. WebTorrent-compatible WebSocket trackers are used only for peer discovery and WebRTC offer/answer signaling; Yjs sync and awareness travel peer-to-peer over WebRTC data channels. This repo is the client only, not a tracker server.
 
-Favor simple, maintainable solutions. Validate at the public options boundary and on untrusted tracker or peer input; do not add defensive handling between internal modules. `TrackerConnection` callbacks must not throw synchronously: observer callbacks (`onAnnounce`, `onState`, `onError`) go through `emitSafely`, `onOffer`/`onAnswer` hand off to async work that reports its own failures, and announce paths handle `createOffers` rejections. Do not complicate rare local races unless a concrete failure justifies it.
+Favor simple, maintainable solutions. Validate at the public options boundary and on untrusted tracker or peer input; do not add defensive handling between internal modules. `TrackerConnection` does not guard its callbacks, so they must not throw synchronously (a rejected `createOffers` promise is handled); observer callbacks go through `emitSafely`. Do not complicate rare local races unless a concrete failure justifies it.
 
 ## Boundaries
 

@@ -31,7 +31,7 @@ export const defaultRtcConfig: RTCConfiguration = {
 const maximumTimerDelay = 2_147_483_647;
 
 const validatePeerId = (peerId: string): PeerId => {
-    if (typeof peerId !== "string" || peerId.length !== 20 || /[Ā-￿]/.test(peerId)) {
+    if (typeof peerId !== "string" || peerId.length !== 20 || /[\u0100-\uffff]/.test(peerId)) {
         throw new RangeError("peerId must be a raw 20-character binary string");
     }
     return peerId;
