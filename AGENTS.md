@@ -1,46 +1,31 @@
-# y-webtorrent agent notes
+# y-webtorrent agent guide
 
-## Project
+y-webtorrent is a browser-oriented Yjs provider. WebTorrent-compatible WebSocket trackers are used only for peer discovery and WebRTC offer/answer signaling; Yjs sync and awareness travel peer-to-peer over WebRTC data channels. This repo is the client only, not a tracker server.
 
-Browser-oriented Yjs provider that uses WebTorrent-compatible WebSocket trackers for peer discovery/signaling and WebRTC data channels for Yjs sync.
+Favor simple, maintainable solutions. Validate at the public options boundary and on untrusted tracker or peer input; do not add defensive handling between internal modules. The provider routes every event through `emitSafely`, so internal callbacks cannot throw. Do not complicate rare local races unless a concrete failure justifies it.
 
-## Key files
+## Boundaries
 
-- `src/y-webtorrent.ts` — `WebtorrentProvider`, Yjs sync/awareness wiring.
-- WebRTC transport is provided by `woohp/webrtc-data-peer`; provider-specific identity and signaling stay here.
-- `src/tracker.ts` — minimal WebTorrent tracker WebSocket announce/signaling client.
-- `src/crypto.ts` — raw 20-byte `info_hash` and `peer_id` helpers.
-- `examples/browser-smoke/` — manual two-tab browser smoke test.
-- `vite.config.js` — Vite config for the browser smoke test.
+- `WebtorrentProvider` (`src/y-webtorrent.ts`) owns Yjs/awareness wiring, peer lifecycle, outbound offer records, and `maxConns` capacity.
+- `TrackerConnection` (`src/tracker.ts`) owns one tracker socket session: announces, reconnect backoff, and which published offers are still outstanding. It is internal and has a single caller.
+- `PeerRegistry` (`src/peer.ts`) is bookkeeping only; it never destroys transports.
+- WebRTC transport comes from `woohp/webrtc-data-peer` on browser-native `RTCPeerConnection`. Frame-size and buffered-byte limits live there; fragmentation and outbound queueing are intentionally unsupported. Avoid Node WebRTC shims unless explicitly adding Node support.
+- Keep `README.md` to usage, options, and semantics callers rely on.
+
+## Protocol and lifecycle invariants
+
+- `info_hash` and `peer_id` are raw 20-character binary strings, not hex.
+- ICE is non-trickle: offers and answers carry complete SDP, so initial connection takes a few seconds.
+- Simultaneous offers resolve by peer-ID ordering while still accepting one-way inbound offers. Canceled offer records must never be announced after late SDP completion.
+- Async callbacks check `connectionGeneration`; the bump in `disconnect` turns late transport and tracker callbacks into no-ops.
+- `synced` requires Yjs Sync Step 2 from a currently connected peer. Protocol-send failure destroys that peer so a later tracker exchange can repair sync; directed messages (`sendToPeer`) are best-effort and never destroy peers.
+- Remote awareness expires by timeout rather than on transport close: forwarded awareness frames have no authoritative owner.
+- Room names select swarms; they are not secrets. Room passwords and the removed `password` option are intentionally unsupported.
+- Debug events are gated by `debug: true`; keep default usage quiet and debug payloads lazy.
 
 ## Validation
 
-- Formatting/linting:
-    - `npm run format`
-    - `npm run lint`
-    - `npm run typecheck`
-    - `npm run build`
-    - `npm run check`
-- Syntax/checks when useful:
-    - `node --check examples/browser-smoke/main.js`
-- Test script:
-    - `npm test` builds and runs the offline provider/transport tests.
-- Browser smoke:
-    - `npm run dev`
-    - open the printed localhost URL in two tabs
-    - default tracker is `ws://localhost:4000/`
-    - type in one tab's textarea and verify the other tab syncs
-
-## Implementation notes
-
-- This repo implements only the client/provider side, not a tracker server.
-- Trackers are used only for discovery and WebRTC offer/answer signaling; Yjs updates go peer-to-peer over WebRTC.
-- `info_hash` and `peer_id` must be raw 20-character binary strings, not hex.
-- The provider uses browser-native `RTCPeerConnection`/`RTCDataChannel` via `webrtc-data-peer`; avoid Node WebRTC shims unless explicitly adding Node support.
-- Do not remove remote awareness immediately when a transport closes: forwarded awareness frames have no authoritative owner metadata, so cleanup remains timeout-based.
-- Room passwords and backward compatibility with the removed `password` option are intentionally unsupported; room names are identifiers, not authentication or access control.
-- The provider currently uses non-trickle ICE, so initial connection can take a few seconds while complete offers/answers are gathered.
-- Public debug internals are gated by `debug: true`; keep default usage quiet.
-- `synced` requires Yjs Sync Step 2 from a currently connected peer. Protocol-send failure destroys that peer so a later tracker exchange can repair synchronization.
-- Single-frame and buffered-byte safeguards come from `webrtc-data-peer`; fragmentation and outbound queueing are intentionally unsupported.
-- Tracker offers may be simultaneous. Resolve duplicate attempts by peer-ID ordering while still accepting one-way inbound offers; canceled offer records must never be announced after late SDP completion.
+- `npm run format`, then `npm run check` (lint, typecheck, build, offline tests).
+- `npm run test:e2e` syncs two Playwright tabs through an in-process tracker. Run it when touching signaling, the transport, or `examples/browser-smoke/`.
+- Offline provider tests drive internals through the fake transports in `test/provider.test.js` (`installSignalingPeers`, `connectProviders`); reuse them instead of adding new fakes.
+- Manual smoke: `npm run dev`, open two tabs against a tracker at `ws://localhost:4000/`.
