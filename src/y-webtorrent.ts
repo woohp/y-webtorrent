@@ -30,6 +30,13 @@ export const defaultRtcConfig: RTCConfiguration = {
 
 const maximumTimerDelay = 2_147_483_647;
 
+const validatePeerId = (peerId: string): PeerId => {
+    if (typeof peerId !== "string" || peerId.length !== 20 || /[Ā-￿]/.test(peerId)) {
+        throw new RangeError("peerId must be a raw 20-character binary string");
+    }
+    return peerId;
+};
+
 const validateCount = (name: string, value: number): number => {
     if (!Number.isInteger(value) || value < 0) {
         throw new RangeError(`${name} must be a non-negative integer`);
@@ -132,7 +139,6 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     readonly debug: boolean;
     readonly awareness: Awareness;
     readonly ready: Promise<void>;
-    shouldConnect = false;
     synced = false;
     infoHash: string | null = null;
     private trackerConnections: TrackerConnection[] = [];
@@ -144,6 +150,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     private readonly _docUpdateHandler: DocUpdateHandler;
     private readonly _awarenessUpdateHandler: AwarenessUpdateHandler;
     private connectionGeneration = 0;
+    private connectionActive = false;
     private connectionPromise: Promise<void> | null = null;
     private destroyed = false;
 
@@ -176,9 +183,9 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
             "maxBufferedAmount",
             opts.maxBufferedAmount ?? 4 * 1024 * 1024,
         );
-        this.rtcConfig = opts.rtcConfig ?? defaultRtcConfig;
+        this.rtcConfig = opts.rtcConfig ?? structuredClone(defaultRtcConfig);
         this.channelName = opts.channelName ?? "y-webtorrent";
-        this.peerId = opts.peerId ?? createPeerId();
+        this.peerId = opts.peerId === undefined ? createPeerId() : validatePeerId(opts.peerId);
         this.debug = !!opts.debug;
         this._WebSocket = opts.WebSocket;
         this._RTCPeerConnection = opts.RTCPeerConnection;
@@ -199,17 +206,22 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         this.ready = this.connect();
     }
 
+    /** Whether the provider is connecting or connected; changed only by `connect`/`disconnect`. */
+    get shouldConnect(): boolean {
+        return this.connectionActive;
+    }
+
     connect(): Promise<void> {
         if (this.destroyed) return Promise.resolve();
         if (this.connectionPromise) return this.connectionPromise;
-        if (this.shouldConnect) return Promise.resolve();
+        if (this.connectionActive) return Promise.resolve();
 
-        this.shouldConnect = true;
+        this.connectionActive = true;
         const generation = ++this.connectionGeneration;
         const attempt = this.initializeConnection(generation);
         const tracked = attempt
             .catch((error: unknown) => {
-                if (generation === this.connectionGeneration) this.shouldConnect = false;
+                if (generation === this.connectionGeneration) this.connectionActive = false;
                 throw error;
             })
             .finally(() => {
@@ -233,7 +245,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
         const localAwarenessState =
             this._ownsAwareness && !this.destroyed ? this.awareness.getLocalState() : null;
         if (localAwarenessState !== null) this.awareness.setLocalState(null);
-        this.shouldConnect = false;
+        this.connectionActive = false;
         this.connectionPromise = null;
         this.connectionGeneration++;
         const disconnectedTrackers = this.trackerConnections;
@@ -721,11 +733,7 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     private sendProtocolMessage(peer: DataPeer, message: Uint8Array<ArrayBuffer>): boolean {
-        try {
-            if (peer.send(message)) return true;
-        } catch (error) {
-            this.emitSafely("peer-error", [error]);
-        }
+        if (peer.send(message)) return true;
         peer.destroy();
         return false;
     }
@@ -755,11 +763,11 @@ export class WebtorrentProvider extends ObservableV2<WebtorrentProviderEvents> {
     }
 
     private isCurrentGeneration(generation: number): boolean {
-        return !this.destroyed && this.shouldConnect && generation === this.connectionGeneration;
+        return !this.destroyed && this.connectionActive && generation === this.connectionGeneration;
     }
 
     private requestRecoveryAnnounce(): void {
-        if (this.destroyed || !this.shouldConnect || this.registry.size >= this.maxConns) return;
+        if (this.destroyed || !this.connectionActive || this.registry.size >= this.maxConns) return;
         for (const tracker of this.trackerConnections) tracker.requestRecoveryAnnounce();
     }
 

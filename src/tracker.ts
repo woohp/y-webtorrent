@@ -86,7 +86,7 @@ export class TrackerConnection {
     readonly onAnnounce: TrackerConnectionOptions["onAnnounce"];
     readonly onState: TrackerConnectionOptions["onState"];
     readonly onError: TrackerConnectionOptions["onError"];
-    readonly WebSocket?: typeof WebSocket;
+    readonly WebSocket: typeof WebSocket;
     readonly connectTimeout: number;
     readonly announceResponseTimeout: number;
     destroyed = false;
@@ -111,14 +111,16 @@ export class TrackerConnection {
         this.onAnnounce = opts.onAnnounce;
         this.onState = opts.onState;
         this.onError = opts.onError;
-        this.WebSocket = opts.WebSocket ?? globalThis.WebSocket;
+        const WebSocketImpl = opts.WebSocket ?? globalThis.WebSocket;
+        if (!WebSocketImpl) throw new Error("No WebSocket implementation is available");
+        this.WebSocket = WebSocketImpl;
         this.connectTimeout = opts.connectTimeout ?? 10000;
         this.announceResponseTimeout = opts.announceResponseTimeout ?? 15000;
         this.connect();
     }
 
     connect(): void {
-        if (this.destroyed || !this.WebSocket) return;
+        if (this.destroyed) return;
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
 
@@ -153,7 +155,7 @@ export class TrackerConnection {
             if (
                 session !== this.session ||
                 this.destroyed ||
-                socket.readyState === this.WebSocket!.OPEN
+                socket.readyState === this.WebSocket.OPEN
             ) {
                 return;
             }
@@ -353,9 +355,7 @@ export class TrackerConnection {
         const session = this.session;
         if (!session) return;
         const requestedSeconds =
-            typeof intervalSeconds === "number" &&
-            Number.isFinite(intervalSeconds) &&
-            intervalSeconds > 0
+            typeof intervalSeconds === "number" && intervalSeconds > 0
                 ? Math.max(intervalSeconds, minimumAnnounceIntervalSeconds)
                 : fallbackAnnounceIntervalSeconds;
         const requestedDelay = requestedSeconds * 1000 * (1 + Math.random() * 0.1);
@@ -451,11 +451,7 @@ export class TrackerConnection {
     }
 
     private isSessionOpen(session: TrackerSession): boolean {
-        return (
-            session === this.session &&
-            !!this.WebSocket &&
-            session.socket.readyState === this.WebSocket.OPEN
-        );
+        return session === this.session && session.socket.readyState === this.WebSocket.OPEN;
     }
 
     private closeSession(session: TrackerSession): void {
