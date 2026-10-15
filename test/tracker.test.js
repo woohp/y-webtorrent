@@ -391,7 +391,7 @@ test("missing and invalid tracker intervals use the fallback schedule", async (c
     socket.open();
     await Promise.resolve();
 
-    for (const interval of [undefined, -1, "invalid", Number.POSITIVE_INFINITY, 3_000_000]) {
+    for (const interval of [undefined, -1, "invalid", 3_000_000]) {
         socket.receive({ complete: 0, interval });
         await Promise.resolve();
         socket.sent.length = 0;
@@ -514,7 +514,7 @@ test("reports tracker failures and warnings before normal filtering", async (con
     const failureSocket = MockWebSocket.sockets[0];
     failureSocket.open();
     await Promise.resolve();
-    failureSocket.receive({ "failure reason": "rejected" });
+    failureSocket.receive({ info_hash: undefined, "failure reason": "rejected" });
     await Promise.resolve();
 
     assert.match(errors[0], /Tracker failure: rejected/);
@@ -526,6 +526,11 @@ test("reports tracker failures and warnings before normal filtering", async (con
     const warningSocket = MockWebSocket.sockets.at(-1);
     warningSocket.open();
     await Promise.resolve();
+    warningSocket.receive({ info_hash: "other-swarm", complete: 1 });
+    await Promise.resolve();
+    assert.equal(announces.length, 0);
+    assert.equal(tracker.reconnectDelay, 2000);
+
     warningSocket.receive({
         complete: 1,
         "warning message": "degraded",

@@ -36,7 +36,7 @@ class FakePeerConnection {
 
 globalThis.RTCPeerConnection = FakePeerConnection;
 
-const { WebtorrentProvider } = await import("../dist/index.js");
+const { WebtorrentProvider, defaultRtcConfig } = await import("../dist/index.js");
 
 const validPeerId = (peerId) => peerId.padEnd(20, "\0").slice(0, 20);
 
@@ -141,26 +141,61 @@ const connectProviders = (first, second) => {
     return { firstPeer, secondPeer };
 };
 
-test("rejects invalid numeric options at construction", () => {
-    for (const [option, value] of [
-        ["maxConns", 0.5],
-        ["signalTimeout", 2_147_483_648],
-        ["maxBufferedAmount", Number.NaN],
+test("rejects invalid options at construction", () => {
+    for (const [option, values] of [
+        ["maxConns", [-1, 0.5, Number.POSITIVE_INFINITY, "1"]],
+        ["signalTimeout", [-1, Number.POSITIVE_INFINITY, 2_147_483_648, "1"]],
+        ["maxBufferedAmount", [-1, Number.NaN, "1"]],
     ]) {
-        assert.throws(() => createProvider("invalid", { [option]: value }), new RegExp(option));
+        for (const value of values) {
+            assert.throws(() => createProvider("invalid", { [option]: value }), new RegExp(option));
+        }
     }
     assert.throws(
         () => createProvider("derived-overflow", { offerTimeout: 2_147_483_647 }),
         /offerCollectionTimeout/,
     );
+    for (const peerId of ["short", "x".repeat(21), `${"x".repeat(19)}\u0100`, 42]) {
+        assert.throws(
+            () => new WebtorrentProvider("invalid", new Y.Doc(), { trackers: [], peerId }),
+            /peerId/,
+        );
+    }
 
     const provider = createProvider("boundaries", {
         maxConns: 0,
         signalTimeout: 0,
+        offerTimeout: 0,
+        offerCollectionTimeout: 2_147_483_647,
         maxBufferedAmount: Number.POSITIVE_INFINITY,
     });
     assert.equal(provider.numwant, 0);
     provider.destroy();
+});
+
+test("default rtcConfig is isolated per provider", () => {
+    const provider = createProvider("rtc-isolation");
+    provider.rtcConfig.iceServers.push({ urls: "turn:instance-only.test" });
+
+    assert.equal(defaultRtcConfig.iceServers.length, 2);
+    provider.destroy();
+});
+
+test("reports a missing WebSocket implementation as a connection error", async () => {
+    const globalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = undefined;
+    try {
+        const provider = createProvider("no-websocket", { trackers: ["wss://tracker.test"] });
+        const errors = [];
+        provider.on("connection-error", (error) => errors.push(error));
+        await provider.ready;
+
+        assert.match(String(errors[0]), /No WebSocket implementation/);
+        assert.equal(provider.trackerConnections.length, 0);
+        provider.destroy();
+    } finally {
+        globalThis.WebSocket = globalWebSocket;
+    }
 });
 
 test("syncs documents and waits for Sync Step 2 before setting synced", async () => {
