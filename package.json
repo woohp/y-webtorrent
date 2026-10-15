@@ -29,17 +29,17 @@
         "test:e2e": "playwright test"
     },
     "dependencies": {
-        "lib0": "^0.2.117",
+        "lib0": "^0.2.119",
         "webrtc-data-peer": "git+https://github.com/woohp/webrtc-data-peer.git#ba5a49f",
         "y-protocols": "^1.0.7",
-        "yjs": "^13.6.31"
+        "yjs": "^13.6.33"
     },
     "devDependencies": {
-        "@playwright/test": "^1.61.1",
-        "oxfmt": "^0.58.0",
-        "oxlint": "^1.73.0",
+        "@playwright/test": "^1.64.1",
+        "oxfmt": "^0.73.0",
+        "oxlint": "^1.88.0",
         "typescript": "^7.0.2",
-        "vite": "^8.1.4",
-        "ws": "^8.21.1"
+        "vite": "^8.3.4",
+        "ws": "^8.22.0"
     }
 }
