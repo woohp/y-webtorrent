@@ -316,23 +316,28 @@ test("does not publish offers completed after destruction", async () => {
     );
 });
 
-test("reports send exceptions and returns false", async () => {
+test("send exceptions close the socket and cancel unsent offers", async () => {
     class ThrowingSendWebSocket extends MockWebSocket {
         send() {
             throw new Error("send failed");
         }
     }
     const errors = [];
+    const canceled = [];
     const tracker = createTracker({
         WebSocket: ThrowingSendWebSocket,
+        createOffers: () => [{ offer_id: "unsent", offer: { type: "offer", sdp: "offer" } }],
+        cancelOffers: (offerIds) => canceled.push(...offerIds),
         onError: (error) => errors.push(error),
     });
     const socket = MockWebSocket.sockets[0];
     socket.open();
     await Promise.resolve();
+    await Promise.resolve();
 
-    assert.equal(tracker.sendAnswer("remote", "offer", { type: "answer", sdp: "answer" }), false);
-    assert.ok(errors.length >= 1);
+    assert.match(String(errors[0]), /send failed/);
+    assert.equal(socket.readyState, 3);
+    assert.deepEqual(canceled, ["unsent"]);
     tracker.destroy();
 });
 
