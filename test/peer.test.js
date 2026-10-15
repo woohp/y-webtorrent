@@ -46,31 +46,6 @@ test("refuses to register the same peer twice", () => {
     assert.equal(registry.size, 1);
 });
 
-test("identify re-files a peer under a new id and releases the old one", () => {
-    const registry = new PeerRegistry();
-    const peer = fakePeer("a");
-    registry.add(peer, "provisional", 0);
-
-    registry.identify(peer, "actual");
-
-    assert.equal(registry.pendingPeer("provisional"), undefined);
-    assert.equal(registry.pendingPeer("actual"), peer);
-    assert.equal(registry.size, 1);
-});
-
-test("identify keeps an already-open peer in the open index", () => {
-    const registry = new PeerRegistry();
-    const peer = fakePeer("a");
-    registry.add(peer, "first", 0);
-    registry.promote(peer);
-
-    registry.identify(peer, "second");
-
-    assert.equal(registry.openPeer("second"), peer);
-    assert.equal(registry.pendingPeer("second"), undefined);
-    assert.equal(registry.openCount, 1);
-});
-
 test("promote moves a peer from pending to open and cancels its deadline", async () => {
     const registry = new PeerRegistry();
     const peer = fakePeer("a");
@@ -112,7 +87,6 @@ test("mutators ignore a peer that was already forgotten", () => {
     // A transport's callbacks can outlive its slot, so these must not throw or resurrect it.
     registry.identify(stale, "remote-a");
     registry.promote(stale);
-    registry.clearTimer(stale);
     assert.equal(registry.remove(stale), undefined);
     assert.equal(registry.size, 0);
     assert.equal(registry.pendingPeer("remote-a"), undefined);
@@ -123,10 +97,19 @@ test("setTimer replaces the previous deadline, and cancels one handed to a stran
     const peer = fakePeer("a");
     registry.add(peer, "remote-a", 0);
     const fired = [];
-    registry.setTimer(peer, setTimeout(() => fired.push("first"), 0));
-    registry.setTimer(peer, setTimeout(() => fired.push("second"), 0));
+    registry.setTimer(
+        peer,
+        setTimeout(() => fired.push("first"), 0),
+    );
+    registry.setTimer(
+        peer,
+        setTimeout(() => fired.push("second"), 0),
+    );
     // Handing a timer to an unregistered peer must not leak it into the event loop.
-    registry.setTimer(fakePeer("stranger"), setTimeout(() => fired.push("stranger"), 0));
+    registry.setTimer(
+        fakePeer("stranger"),
+        setTimeout(() => fired.push("stranger"), 0),
+    );
 
     await afterDeadlines();
     assert.deepEqual(fired, ["second"]);

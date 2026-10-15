@@ -2,19 +2,11 @@ import type { PeerId } from "./tracker.js";
 
 /** @internal Transport contract and peer bookkeeping; not exported from the package entry point. */
 
-/**
- * The transport surface the provider actually depends on. `WebrtcDataPeer` satisfies this
- * structurally, so naming it costs nothing at runtime; it exists to keep provider logic
- * independent of the concrete transport and to state plainly how little of it is used.
- */
+/** The transport surface the provider depends on; `WebrtcDataPeer` satisfies it structurally. */
 export interface DataPeer {
     readonly initiator: boolean;
     readonly connected: boolean;
-    /**
-     * Narrowed to the one member the provider reads. The read is deliberately late — see
-     * `collectOffers`, which prefers the description as amended by ongoing ICE gathering
-     * over whatever `createOffer` resolved with.
-     */
+    /** Read late by `collectOffers` to pick up candidates gathered after `createOffer`. */
     readonly pc: { readonly localDescription: RTCSessionDescription | null };
     createOffer(): Promise<RTCSessionDescriptionInit>;
     acceptOffer(offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit>;
@@ -39,21 +31,12 @@ export interface PeerSlot {
 }
 
 /**
- * Owns per-peer state and the indexes over it.
+ * Owns per-peer state and the id indexes over it. Never calls `destroy` on a transport; peer
+ * lifecycle stays with the provider.
  *
- * The provider previously kept this in seven parallel collections keyed on the peer object
- * and on its id, which meant removal had to scan for reverse mappings, capacity was
- * re-derived at each call site, and teardown depended on clearing every collection in
- * order. Keeping one record per peer and maintaining the id indexes here makes those
- * operations single lookups and gives the "connected plus pending" invariant one home.
- *
- * Peer lifecycle stays with the provider: this class never calls `destroy` on a transport,
- * it only forgets it.
- *
- * Registering a peer twice throws; every other mutator is a no-op on an unregistered peer.
- * That asymmetry is deliberate. A transport's callbacks can outlive the slot — a generation
- * bump during `disconnect` forgets peers whose channels then open anyway — so the mutators
- * have to tolerate arriving late. Nothing legitimately registers the same peer twice.
+ * Registering a peer twice throws; every other mutator is a no-op on an unregistered peer,
+ * because transport callbacks can outlive their slot (e.g. a channel opening after
+ * `disconnect` forgot it).
  */
 export class PeerRegistry {
     private readonly slots = new Map<DataPeer, PeerSlot>();
@@ -117,11 +100,7 @@ export class PeerRegistry {
 
     /**
      * Registers a newly created transport as pending. `peerId` is null for outbound offers.
-     *
-     * Throws on re-registration rather than replacing the slot. Overwriting silently would
-     * orphan the old slot's timer and leave its id indexed, and the symptom surfaces far from
-     * the second `add` — during this registry's own rollout a double-registered test peer
-     * reverted to `peerId: null` and simply stopped being findable.
+     * Throws on re-registration, since replacing the slot would orphan its timer and index.
      */
     add(peer: DataPeer, peerId: PeerId | null, startedAt: number): PeerSlot {
         if (this.slots.has(peer)) throw new Error("peer is already registered");
@@ -138,24 +117,20 @@ export class PeerRegistry {
         return slot;
     }
 
-    /**
-     * Attaches a remote id to a peer discovered through a tracker answer, releasing any id
-     * it was previously filed under.
-     */
+    /** Attaches a remote id to a pending outbound peer once a tracker answer names it. */
     identify(peer: DataPeer, peerId: PeerId): void {
         const slot = this.slots.get(peer);
         if (!slot) return;
-        if (slot.peerId !== null && slot.peerId !== peerId) this.unindex(slot);
         slot.peerId = peerId;
-        if (slot.state === "open") this.openByPeerId.set(peerId, peer);
-        else this.pendingByPeerId.set(peerId, peer);
+        this.pendingByPeerId.set(peerId, peer);
     }
 
     /** Promotes a pending peer to open once its data channel is usable. */
     promote(peer: DataPeer): void {
         const slot = this.slots.get(peer);
         if (!slot || slot.peerId === null || slot.state === "open") return;
-        this.clearTimer(peer);
+        clearTimeout(slot.timer);
+        slot.timer = undefined;
         this.pendingByPeerId.delete(slot.peerId);
         slot.state = "open";
         this.openByPeerId.set(slot.peerId, peer);
@@ -169,13 +144,6 @@ export class PeerRegistry {
         }
         clearTimeout(slot.timer);
         slot.timer = timer;
-    }
-
-    clearTimer(peer: DataPeer): void {
-        const slot = this.slots.get(peer);
-        if (!slot) return;
-        clearTimeout(slot.timer);
-        slot.timer = undefined;
     }
 
     /** Forgets a peer. Returns its final slot so callers can see whether it had been open. */
